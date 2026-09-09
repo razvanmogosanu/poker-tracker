@@ -1,0 +1,22 @@
+PokerStars Hand #900000004:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:03:00 EET [2026/09/01 3:03:00 ET]
+Table 'FixtureHU' 2-max Seat #2 is the button
+Seat 1: BigBlind ($2 in chips)
+Seat 2: ButtonSb ($2 in chips)
+ButtonSb: posts small blind $0.01
+BigBlind: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to ButtonSb [Ad Kd]
+ButtonSb: raises $0.02 to $0.04
+BigBlind: calls $0.02
+*** FLOP *** [3c 8h Jd]
+BigBlind: checks
+ButtonSb: bets $0.04
+BigBlind: folds
+Uncalled bet ($0.04) returned to ButtonSb
+ButtonSb collected $0.08 from pot
+ButtonSb: doesn't show hand
+*** SUMMARY ***
+Total pot $0.08 | Rake $0
+Board [3c 8h Jd]
+Seat 1: BigBlind (big blind) folded on the Flop
+Seat 2: ButtonSb (small blind) collected ($0.08)

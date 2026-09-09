@@ -1,0 +1,41 @@
+PokerStars Hand #900000006:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:05:00 EET [2026/09/01 3:05:00 ET]
+Table 'FixtureDead' 6-max Seat #1 is the button
+Seat 1: Btn ($2 in chips)
+Seat 2: Sb ($2 in chips)
+Seat 3: Bb ($2 in chips)
+Seat 4: Utg ($2 in chips)
+Seat 5: Returner ($2 in chips)
+Seat 6: Co ($2 in chips)
+Sb: posts small blind $0.01
+Bb: posts big blind $0.02
+Returner: posts small & big blinds $0.03
+*** HOLE CARDS ***
+Dealt to Utg [Ah Kh]
+Utg: raises $0.04 to $0.06
+Returner: calls $0.04
+Co: folds
+Btn: folds
+Sb: folds
+Bb: folds
+*** FLOP *** [2c 7d 9s]
+Utg: checks
+Returner: checks
+*** TURN *** [2c 7d 9s] [Kc]
+Utg: checks
+Returner: checks
+*** RIVER *** [2c 7d 9s Kc] [4h]
+Utg: checks
+Returner: checks
+*** SHOW DOWN ***
+Utg: shows [Ah Kh] (a pair of Kings)
+Returner: shows [5d 5c] (a pair of Fives)
+Utg collected $0.15 from pot
+*** SUMMARY ***
+Total pot $0.16 | Rake $0.01
+Board [2c 7d 9s Kc 4h]
+Seat 1: Btn (button) folded before Flop (didn't bet)
+Seat 2: Sb (small blind) folded before Flop
+Seat 3: Bb (big blind) folded before Flop
+Seat 4: Utg showed [Ah Kh] and won ($0.15) with a pair of Kings
+Seat 5: Returner showed [5d 5c] and lost with a pair of Fives
+Seat 6: Co folded before Flop (didn't bet)

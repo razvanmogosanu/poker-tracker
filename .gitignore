@@ -1,0 +1,11 @@
+# Personal data: the database and the rendered dashboard are built from
+# local hand histories and are rebuildable with `cli refresh`.
+poker.db
+poker.db-wal
+poker.db-shm
+report.html
+
+__pycache__/
+*.py[cod]
+
+.claude/settings.local.json

@@ -1,0 +1,41 @@
+PokerStars Hand #900000009:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:08:00 EET [2026/09/01 3:08:00 ET]
+Table 'FixtureShow' 6-max Seat #4 is the button
+Seat 1: Watcher ($1.53 in chips)
+Seat 2: Bettor ($1.89 in chips)
+Seat 3: Folder3 ($1.84 in chips)
+Seat 4: Btn ($2.73 in chips)
+Seat 5: Small ($2.21 in chips)
+Seat 6: Shower ($3.95 in chips)
+Small: posts small blind $0.01
+Shower: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Watcher [5d Qd]
+Watcher: folds
+Bettor: raises $0.04 to $0.06
+Folder3: folds
+Btn: folds
+Small: folds
+Shower: calls $0.04
+*** FLOP *** [4c Qc As]
+Shower: checks
+Bettor: bets $0.06
+Shower: calls $0.06
+*** TURN *** [4c Qc As] [2c]
+Shower: checks
+Bettor: checks
+*** RIVER *** [4c Qc As 2c] [Kc]
+Shower: checks
+Bettor: bets $0.18
+Shower: folds [2h Qh]
+Uncalled bet ($0.18) returned to Bettor
+Bettor collected $0.24 from pot
+Bettor: doesn't show hand
+*** SUMMARY ***
+Total pot $0.25 | Rake $0.01
+Board [4c Qc As 2c Kc]
+Seat 1: Watcher folded before Flop (didn't bet)
+Seat 2: Bettor collected ($0.24)
+Seat 3: Folder3 folded before Flop (didn't bet)
+Seat 4: Btn (button) folded before Flop (didn't bet)
+Seat 5: Small (small blind) folded before Flop
+Seat 6: Shower (big blind) folded on the River

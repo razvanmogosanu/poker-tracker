@@ -1,0 +1,41 @@
+PokerStars Hand #900000010:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:09:00 EET [2026/09/01 3:09:00 ET]
+Table 'FixtureCashW' 6-max Seat #4 is the button
+Seat 1: Caller ($1.56 in chips)
+Seat 2: Watcher ($1.55 in chips)
+Seat 3: Folder3 ($2.18 in chips)
+Seat 4: Insurer ($1.38 in chips)
+Seat 5: Small ($2.61 in chips)
+Seat 6: Big ($3.36 in chips)
+Small: posts small blind $0.01
+Big: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Watcher [3c Ah]
+Caller: raises $0.02 to $0.04
+Watcher: folds
+Folder3: folds
+Insurer: calls $0.04
+Small: folds
+Big: calls $0.02
+*** FLOP *** [8d 2s Jh]
+Big: checks
+Caller: bets $0.12
+Insurer: calls $0.12
+Big: folds
+*** TURN *** [8d 2s Jh] [Ac]
+Caller: bets $0.18
+Insurer: raises $1.04 to $1.22 and is all-in
+Caller: calls $1.04
+*** RIVER *** [8d 2s Jh Ac] [4s]
+*** SHOW DOWN ***
+Caller: shows [Js 6s] (a pair of Jacks)
+Insurer: shows [Jd 8c] (two pair, Jacks and Eights)
+Insurer cashed out the hand for $2.52 | Cash Out Fee $0.05
+*** SUMMARY ***
+Total pot $2.81 | Rake $0.14
+Board [8d 2s Jh Ac 4s]
+Seat 1: Caller showed [Js 6s] and lost with a pair of Jacks
+Seat 2: Watcher folded before Flop (didn't bet)
+Seat 3: Folder3 folded before Flop (didn't bet)
+Seat 4: Insurer (button) showed [Jd 8c] and won ($2.67) with two pair, Jacks and Eights (pot not awarded as player cashed out)
+Seat 5: Small (small blind) folded before Flop
+Seat 6: Big (big blind) folded on the Flop

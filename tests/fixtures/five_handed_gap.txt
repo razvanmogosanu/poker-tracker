@@ -1,0 +1,31 @@
+PokerStars Hand #900000002:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:01:00 EET [2026/09/01 3:01:00 ET]
+Table 'Fixture5' 6-max Seat #2 is the button
+Seat 1: Cutoff ($2 in chips)
+Seat 2: Button ($2 in chips)
+Seat 4: Small ($2 in chips)
+Seat 5: Big ($2 in chips)
+Seat 6: Hijack ($2 in chips)
+Small: posts small blind $0.01
+Big: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Button [Ah Kh]
+Hijack: folds
+Cutoff: folds
+Button: raises $0.04 to $0.06
+Small: folds
+Big: calls $0.04
+*** FLOP *** [2c 7d 9s]
+Big: checks
+Button: bets $0.06
+Big: folds
+Uncalled bet ($0.06) returned to Button
+Button collected $0.12 from pot
+Button: doesn't show hand
+*** SUMMARY ***
+Total pot $0.13 | Rake $0.01
+Board [2c 7d 9s]
+Seat 1: Cutoff folded before Flop (didn't bet)
+Seat 2: Button (button) collected ($0.12)
+Seat 4: Small (small blind) folded before Flop
+Seat 5: Big (big blind) folded on the Flop
+Seat 6: Hijack folded before Flop (didn't bet)

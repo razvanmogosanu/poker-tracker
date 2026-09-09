@@ -1,0 +1,41 @@
+PokerStars Hand #900000008:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:07:00 EET [2026/09/01 3:07:00 ET]
+Table 'FixtureCash' 6-max Seat #3 is the button
+Seat 1: Insurer ($2 in chips)
+Seat 2: Watcher ($2.01 in chips)
+Seat 3: Btn ($0.95 in chips)
+Seat 4: Small ($2.05 in chips)
+Seat 5: Big ($2.10 in chips)
+Seat 6: Winner ($1.15 in chips)
+Small: posts small blind $0.01
+Big: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Watcher [8h 9h]
+Winner: calls $0.02
+Insurer: raises $0.06 to $0.08
+Watcher: folds
+Btn: folds
+Small: folds
+Big: folds
+Winner: raises $0.06 to $0.14
+Insurer: calls $0.06
+*** FLOP *** [Ks 8c 7c]
+Winner: bets $0.02
+Insurer: raises $0.17 to $0.19
+Winner: raises $0.82 to $1.01 and is all-in
+Insurer: calls $0.82
+*** TURN *** [Ks 8c 7c] [Ad]
+*** RIVER *** [Ks 8c 7c Ad] [9s]
+*** SHOW DOWN ***
+Winner: shows [Ac 6c] (a pair of Aces)
+Insurer: shows [Qs Kc] (a pair of Kings)
+Winner collected $2.21 from pot
+Insurer cashed out the hand for $1.20 | Cash Out Fee $0.02
+*** SUMMARY ***
+Total pot $2.33 | Rake $0.12
+Board [Ks 8c 7c Ad 9s]
+Seat 1: Insurer showed [Qs Kc] and lost with a pair of Kings (cashed out).
+Seat 2: Watcher folded before Flop (didn't bet)
+Seat 3: Btn (button) folded before Flop (didn't bet)
+Seat 4: Small (small blind) folded before Flop
+Seat 5: Big (big blind) folded before Flop
+Seat 6: Winner showed [Ac 6c] and won ($2.21) with a pair of Aces

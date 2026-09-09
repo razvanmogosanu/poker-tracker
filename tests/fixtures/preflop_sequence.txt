@@ -1,0 +1,32 @@
+PokerStars Hand #900000007:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:06:00 EET [2026/09/01 3:06:00 ET]
+Table 'FixtureSeq' 6-max Seat #1 is the button
+Seat 1: Btn ($5 in chips)
+Seat 2: Sb ($5 in chips)
+Seat 3: Bb ($5 in chips)
+Seat 4: Utg ($5 in chips)
+Seat 5: Hj ($5 in chips)
+Seat 6: Co ($5 in chips)
+Sb: posts small blind $0.01
+Bb: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Utg [Ah Kh]
+Utg: raises $0.04 to $0.06
+Hj: calls $0.06
+Co: raises $0.14 to $0.20
+Btn: folds
+Sb: folds
+Bb: folds
+Utg: raises $0.40 to $0.60
+Hj: folds
+Co: folds
+Uncalled bet ($0.40) returned to Utg
+Utg collected $0.47 from pot
+Utg: doesn't show hand
+*** SUMMARY ***
+Total pot $0.49 | Rake $0.02
+Seat 1: Btn (button) folded before Flop (didn't bet)
+Seat 2: Sb (small blind) folded before Flop
+Seat 3: Bb (big blind) folded before Flop
+Seat 4: Utg collected ($0.47)
+Seat 5: Hj folded before Flop
+Seat 6: Co folded before Flop
