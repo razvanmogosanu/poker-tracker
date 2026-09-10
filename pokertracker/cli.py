@@ -255,7 +255,7 @@ def main(argv=None) -> int:
     s.set_defaults(func=cmd_refresh)
 
     s = sub.add_parser("serve",
-                       help="serve the dashboard with a working Refresh button")
+                       help="serve the dashboard, refreshing itself every 60s")
     s.add_argument("--root", default=str(DEFAULT_ROOT))
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-open", action="store_true",

@@ -1,9 +1,9 @@
 """A small local server so the report can refresh itself.
 
 The dashboard is a static file, and a page opened over file:// cannot run the
-parser. Serving it from localhost instead lets the Refresh button POST to
-/api/refresh, which runs exactly the same pipeline as `cli refresh` and reports
-back how many new hands turned up.
+parser. Serving it from localhost instead lets the page POST to /api/refresh
+every 60 seconds, which runs exactly the same pipeline as `cli refresh` and
+reports back how many new hands turned up.
 
 Nothing here is exposed beyond the loopback interface and there is no state in
 the server itself: every request opens its own SQLite connection, so the
@@ -89,7 +89,7 @@ def make_handler(db_path: str, root: str, hero: str):
 
         def log_message(self, fmt, *args):
             if self.command == "POST":
-                print(f"  refresh requested at {self.log_date_time_string()}")
+                print(f"  refresh at {self.log_date_time_string()}")
 
     return Handler
 

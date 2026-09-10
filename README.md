@@ -10,9 +10,8 @@ Pure standard library plus numpy. No install step, no plotting library, no CDN.
 ## Use it
 
 **Double-click `Poker tracker` on the Desktop.** The dashboard opens in your
-browser with a **Refresh hands** button; press it after a session (or tick
-*auto every 60s*) and it parses whatever PokerStars has written since. No
-terminal involved.
+browser and re-parses whatever PokerStars has written every 60 seconds on its
+own; the toolbar says when it last looked. No terminal involved.
 
 A console window stays open behind it — that is the server. Leave it open while
 you use the dashboard; close it to stop. Launching a second time just reopens
@@ -24,15 +23,16 @@ wrapper around `serve` below.
 ### From a terminal
 
 ```bash
-python -m pokertracker.cli serve     # dashboard with a working Refresh button
+python -m pokertracker.cli serve     # dashboard that refreshes itself
 python -m pokertracker.cli refresh   # or just regenerate report.html once
 ```
 
-`serve` opens the dashboard on `http://127.0.0.1:8765/` with a **Refresh hands**
-button and an optional 60-second auto-refresh. The button POSTs to the local
-server, which runs the same pipeline and reloads the page in place, preserving
-your scroll position. A `report.html` opened directly from disk has no button,
-because a `file://` page cannot run the parser.
+`serve` opens the dashboard on `http://127.0.0.1:8765/`, where it polls the
+local server every 60 seconds. Each poll runs the same pipeline; when it finds
+new hands the page reloads in place, preserving your scroll position, and the
+toolbar carries the time of the last check either way. A `report.html` opened
+directly from disk never refreshes, because a `file://` page cannot run the
+parser.
 
 `refresh` is the only command you otherwise need: it imports anything new from
 `%LOCALAPPDATA%\PokerStars.RO\HandHistory`, recomputes the derived tables,
@@ -51,7 +51,7 @@ Other commands:
 | `stats --problems` | List hands the parser could not balance or understand |
 | `ev` | Compute all-in EV only |
 | `report -o out.html` | Write the dashboard only |
-| `serve --port 8765` | Serve the dashboard with a live Refresh button |
+| `serve --port 8765` | Serve the dashboard, refreshing itself every 60s |
 
 Useful flags: `--root` for a different history folder, `--db` for a different
 database, `--hero` to override screen-name detection.

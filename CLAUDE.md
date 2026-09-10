@@ -11,7 +11,7 @@ library, no CDN.
 
 ```bash
 python -m pokertracker.cli refresh   # import + derive + EV + write report.html
-python -m pokertracker.cli serve     # same, served on :8765 with a Refresh button
+python -m pokertracker.cli serve     # same, served on :8765, refreshing itself
 python -m pokertracker.cli stats     # everything to the terminal
 python -m pokertracker.cli stats --problems   # parse failures; see "Problems" below
 python -m pokertracker.cli import --force     # re-read files the mtime check skipped
@@ -231,9 +231,13 @@ the question, and is not the same claim as `off`.
 
 ## Report
 
-`report.build(conn, hero, live=False)`. `live=True` adds the Refresh toolbar and
+`report.build(conn, hero, live=False)`. `live=True` adds the refresh toolbar and
 its JavaScript, and is used only by `serve.py` — a `file://` page cannot run the
-parser, so the on-disk `report.html` deliberately has no button.
+parser, so the on-disk `report.html` deliberately never refreshes. The live page
+polls `/api/refresh` every 60 seconds and reloads *only* when the poll reports
+new hands, so a reader mid-scroll is not thrown back to the top on every tick;
+the toolbar stamp moves on every poll, including the empty ones, because "we
+looked and there was nothing new" is what the line is there to say.
 
 Charts are hand-written SVG referencing CSS custom properties, so the whole
 report is one file that follows the reader's light/dark theme. Colours were run

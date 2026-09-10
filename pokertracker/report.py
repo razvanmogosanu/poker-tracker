@@ -212,13 +212,6 @@ summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
 }
 footer { margin-top: 46px; color: var(--muted); font-size: 12.5px; }
 .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 20px; }
-.btn {
-  font: inherit; font-size: 13.5px; font-weight: 500; padding: 7px 16px;
-  border-radius: 8px; cursor: pointer; border: 1px solid var(--border);
-  background: var(--ink); color: var(--surface);
-}
-.btn:hover:not(:disabled) { opacity: .88; }
-.btn:disabled { opacity: .5; cursor: progress; }
 .status { font-size: 13px; color: var(--ink-2); }
 .status.busy::after {
   content: ''; display: inline-block; width: 9px; height: 9px; margin-left: 7px;
@@ -226,7 +219,6 @@ footer { margin-top: 46px; color: var(--muted); font-size: 12.5px; }
   vertical-align: -1px; animation: spin .7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.auto { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .hands th.sortable-col { cursor: pointer; user-select: none; white-space: nowrap; }
 .hands th.sortable-col:hover { color: var(--ink-2); }
 .hands th.sortable-col::after { content: ' \\2195'; opacity: .25; }
@@ -579,11 +571,10 @@ JS = """
 
 LIVE_JS = """
 (function () {
-  const btn = document.getElementById('refresh');
-  if (!btn) return;
   const status = document.getElementById('refresh-status');
-  const auto = document.getElementById('auto');
-  const SCROLL = 'pt-scroll', AUTOKEY = 'pt-auto';
+  if (!status) return;
+  const SCROLL = 'pt-scroll';
+  const EVERY = 60000;
 
   // A reload would otherwise throw the reader back to the top of the page.
   const saved = sessionStorage.getItem(SCROLL);
@@ -592,47 +583,59 @@ LIVE_JS = """
     sessionStorage.removeItem(SCROLL);
   }
 
+  // The page was rendered by the server on this request, so it is as fresh as
+  // a poll that just returned. Every later poll moves the stamp, whether or
+  // not it found anything, because "we looked and there was nothing" is the
+  // reassurance the line exists to give.
+  let stamp = new Date();
   let busy = false;
-  function setStatus(text, spinning) {
-    status.textContent = text;
-    status.classList.toggle('busy', !!spinning);
+
+  function clock(d) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
-  async function refresh(manual) {
+  function idle(text) {
+    status.textContent = text;
+    status.classList.remove('busy');
+  }
+  function showStamp() {
     if (busy) return;
-    busy = true; btn.disabled = true;
-    setStatus('Parsing new hands', true);
+    const secs = Math.round((Date.now() - stamp.getTime()) / 1000);
+    const ago = secs < 90 ? secs + 's ago'
+              : Math.round(secs / 60) + 'm ago';
+    idle('Last refreshed ' + clock(stamp) + ' · ' + ago);
+  }
+
+  async function refresh() {
+    if (busy) return;
+    busy = true;
+    status.textContent = 'Checking for new hands';
+    status.classList.add('busy');
     try {
       const res = await fetch('/api/refresh', { method: 'POST' });
       const d = await res.json();
       if (!d.ok) {
-        setStatus('Failed: ' + (d.error || 'unknown error'), false);
-        btn.disabled = false; busy = false; return;
+        busy = false;
+        idle('Refresh failed at ' + clock(new Date()) + ': ' + (d.error || 'unknown error'));
+        return;
       }
-      // An automatic poll that found nothing must not steal the page from under
-      // someone who is reading it.
-      if (!d.new_hands && !manual) {
-        setStatus('No new hands at ' + new Date().toLocaleTimeString(), false);
-        btn.disabled = false; busy = false; return;
+      stamp = new Date();
+      if (!d.new_hands) {
+        busy = false;
+        showStamp();
+        return;
       }
-      setStatus(d.new_hands ? ('+' + d.new_hands + ' hands, reloading') : 'Reloading', true);
+      status.textContent = '+' + d.new_hands + ' hands, reloading';
       sessionStorage.setItem(SCROLL, String(window.scrollY));
       location.reload();
     } catch (e) {
-      setStatus('Failed: ' + e.message, false);
-      btn.disabled = false; busy = false;
+      busy = false;
+      idle('Refresh failed at ' + clock(new Date()) + ': ' + e.message);
     }
   }
-  btn.addEventListener('click', function () { refresh(true); });
 
-  let timer = null;
-  function applyAuto() {
-    localStorage.setItem(AUTOKEY, auto.checked ? '1' : '0');
-    if (timer) { clearInterval(timer); timer = null; }
-    if (auto.checked) timer = setInterval(function () { refresh(false); }, 60000);
-  }
-  auto.checked = localStorage.getItem(AUTOKEY) === '1';
-  auto.addEventListener('change', applyAuto);
-  applyAuto();
+  showStamp();
+  setInterval(showStamp, 5000);
+  setInterval(refresh, EVERY);
 })();
 """
 
@@ -1167,9 +1170,7 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
                    "noisier.")
     toolbar = ("""
 <div class="toolbar">
-  <button type="button" id="refresh" class="btn">Refresh hands</button>
-  <span id="refresh-status" class="status">Showing every hand imported so far</span>
-  <label class="auto"><input type="checkbox" id="auto"> auto every 60s</label>
+  <span id="refresh-status" class="status">Checking every 60s</span>
 </div>""" if live else "")
     live_js = LIVE_JS if live else ""
     a = regions["all"]
