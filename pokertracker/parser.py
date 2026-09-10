@@ -216,6 +216,9 @@ NOISE_FRAGMENTS = (
     " doesn't show hand",
     " mucks hand",
     " is no longer sitting out",
+    # Tournament side prizes -- tickets, seats, entries. They are awarded
+    # alongside the pot and are not part of it.
+    " wins a ",
 )
 NOISE_PREFIXES = ("Board ", "Hand cancelled", "Total pot ")
 
@@ -291,6 +294,7 @@ def parse_hand(block: str, hero_hint: str = "") -> Hand:  # noqa: C901 - a parse
     cashout_received: dict[str, int] = {}
     allowed_later: set[str] = set()
     posted: set[str] = set()
+    sb_posted = False
     in_summary = False
     summary_seats: dict[int, str] = {}
     seen_hole_cards = False
@@ -386,7 +390,22 @@ def parse_hand(block: str, hero_hint: str = "") -> Hand:  # noqa: C901 - a parse
                 committed[player] = committed.get(player, 0) + hand.bb
                 add("post", player, amt, committed[player], blind=True)
                 posted.add(player)
+            elif "small blind" in what and sb_posted:
+                # The hand's second small blind is a *dead* post: a player who
+                # sat out through the blinds pays it to be dealt in again, and
+                # it buys them nothing. It is dead money like an ante, so it
+                # never touches `committed` -- a returning player who then
+                # "raises $0.02 to $0.04" ends the street with $0.05 in front of
+                # them, not $0.04, and the pot only balances if that extra cent
+                # is counted. Live posts always print before dead ones, so the
+                # first small blind of the hand is the real one.
+                add("post", player, amt, committed.get(player, 0), blind=True)
+                posted.add(player)
             else:
+                # An out-of-position big blind post, by contrast, is live money:
+                # the poster has genuinely bet it and calls a raise for the
+                # difference like any other big blind.
+                sb_posted = sb_posted or "small blind" in what
                 committed[player] = committed.get(player, 0) + amt
                 add("post", player, amt, committed[player], blind=True)
                 posted.add(player)

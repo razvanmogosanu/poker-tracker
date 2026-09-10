@@ -1,0 +1,35 @@
+PokerStars Hand #900000011:  Hold'em No Limit ($0.01/$0.02 USD) - 2026/09/01 10:10:00 EET [2026/09/01 3:10:00 ET]
+Table 'FixtureDeadPost' 6-max Seat #1 is the button
+Seat 1: Btn ($1.83 in chips)
+Seat 2: Sb ($0.63 in chips)
+Seat 3: Bb ($2.22 in chips)
+Seat 4: Utg ($1.72 in chips)
+Seat 5: Hj ($2.39 in chips)
+Seat 6: Returner ($0.99 in chips)
+Sb: posts small blind $0.01
+Bb: posts big blind $0.02
+Returner is connected
+Returner: posts small blind $0.01
+*** HOLE CARDS ***
+Dealt to Utg [Ac 2s]
+Utg: folds
+Hj: folds
+Returner: raises $0.02 to $0.04
+Btn: folds
+Sb: calls $0.03
+Bb: folds
+*** FLOP *** [Ad 8c 6s]
+Sb: checks
+Returner: bets $0.06
+Sb: folds
+Uncalled bet ($0.06) returned to Returner
+Returner collected $0.10 from pot
+*** SUMMARY ***
+Total pot $0.11 | Rake $0.01
+Board [Ad 8c 6s]
+Seat 1: Btn (button) folded before Flop (didn't bet)
+Seat 2: Sb (small blind) folded on the Flop
+Seat 3: Bb (big blind) folded before Flop
+Seat 4: Utg folded before Flop (didn't bet)
+Seat 5: Hj folded before Flop (didn't bet)
+Seat 6: Returner collected ($0.10)

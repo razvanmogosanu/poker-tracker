@@ -90,6 +90,16 @@ blind holding $0.02 who "raises $0.04 to $0.10" adds $0.08. `to_amount` is the
 player's total street commitment after acting, and is what every raise-size and
 3-bet rule needs.
 
+**A dead blind is money in the pot that is not a bet.** It reaches `contributed`
+but never `committed`, so it does not reduce what its poster has to put in next.
+Three shapes, all with fixtures: an ante; "posts small & big blinds", where only
+the big blind half is live; and a lone second small blind, posted by a player
+who sat out through the blinds — that one is dead in full, so their "raises
+$0.02 to $0.04" leaves 5c in front of them and the pot balances only if the
+extra cent is counted. Live posts print before dead ones, so the hand's *first*
+small blind is the real one. An out-of-position big blind post is live money and
+is the exception to all of this.
+
 **A cash-out is an insurance settlement, not a share of the pot.** Never add it
 to `collected`. Two shapes occur and both have fixtures:
 - The *winner* cashes out: no `collected` line is emitted at all, the pot is

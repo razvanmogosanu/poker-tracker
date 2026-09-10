@@ -2,8 +2,8 @@
 
 The fixtures deliberately cover the table shapes where position derivation goes
 wrong: full ring, a short table with a hole in the seating, four-handed,
-heads-up, and the two blind anomalies (a second live big blind, and a dead
-small blind posted as "small & big blinds").
+heads-up, and the blind anomalies (a second live big blind, a dead small blind
+posted as "small & big blinds", and a dead small blind posted on its own).
 """
 
 from __future__ import annotations
@@ -97,6 +97,12 @@ class TestPositions(unittest.TestCase):
 
     def test_dead_small_blind_keeps_seat_position(self):
         self.assertEqual(positions(load("dead_small_blind"))["Returner"], "HJ")
+
+    def test_dead_small_blind_post_keeps_seat_position(self):
+        # Two players post a small blind in this hand. The dead one sits in the
+        # cutoff and stays there: position comes from the button, never from
+        # which blind a player put in.
+        self.assertEqual(positions(load("dead_small_blind_post"))["Returner"], "CO")
 
 
 class TestParserInvariants(unittest.TestCase):
@@ -201,6 +207,39 @@ class TestActionSemantics(unittest.TestCase):
         call = next(a for a in hand.actions
                     if a.player == "Returner" and a.action == "call")
         self.assertEqual((call.amount, call.to_amount), (4, 6))
+
+    def test_second_small_blind_of_the_hand_is_a_dead_post(self):
+        # A player who sat out through the blinds posts a small blind to be
+        # dealt in again. That cent buys nothing: it is dead money, so the raise
+        # that follows is "to $0.04" on top of it and the player ends the street
+        # having put in 5c. Counting the post as live loses a cent and the pot
+        # stops balancing.
+        hand = load("dead_small_blind_post")
+        post = next(a for a in hand.actions
+                    if a.player == "Returner" and a.action == "post")
+        self.assertEqual((post.amount, post.to_amount), (1, 0))
+        raise_ = next(a for a in hand.actions
+                      if a.player == "Returner" and a.action == "raise")
+        self.assertEqual((raise_.amount, raise_.to_amount), (4, 4))
+        returner = next(r for r in hand.results if r.player == "Returner")
+        self.assertEqual(returner.contributed, 5)
+        self.assertEqual(hand.problems, [])
+
+    def test_live_small_blind_is_still_live(self):
+        # The first small blind of the hand is the real one and must keep
+        # counting toward what its poster has to call.
+        hand = load("dead_small_blind_post")
+        post = next(a for a in hand.actions if a.player == "Sb" and a.action == "post")
+        self.assertEqual((post.amount, post.to_amount), (1, 1))
+        call = next(a for a in hand.actions if a.player == "Sb" and a.action == "call")
+        self.assertEqual((call.amount, call.to_amount), (3, 4))
+
+    def test_tournament_side_prize_is_not_pot_money(self):
+        # A ticket is awarded alongside the pot, not out of it.
+        hand = load("tournament_ticket")
+        self.assertEqual(hand.problems, [])
+        winner = next(r for r in hand.results if r.player == "Btn")
+        self.assertEqual(winner.collected, 94000)  # chips scaled by 100
 
     def test_uncalled_bet_reduces_contribution(self):
         hand = load("preflop_sequence")
@@ -519,6 +558,11 @@ class TestPeriodFilters(unittest.TestCase):
                   "2026-09-01 18:00:00", "2026-09-01 18:01:00",
                   "2026-09-03 20:00:00", "2026-09-03 20:01:00", "2026-09-03 20:02:00",
                   "2026-09-03 21:30:00", "2026-09-03 21:31:00"]
+        # A fixture added later must land inside the last session rather than
+        # quietly keeping its own timestamp, or adding one would change which
+        # periods this class is exercising.
+        stamps += [f"2026-09-03 21:{32 + i:02d}:00"
+                   for i in range(len(rows) - len(stamps))]
         for r, stamp in zip(rows, stamps):
             cls.conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
                              (stamp, r["hand_id"]))

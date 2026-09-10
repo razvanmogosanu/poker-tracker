@@ -1,0 +1,32 @@
+PokerStars Hand #900000012: Tournament #4030000000, $0.46+$0.04 USD Hold'em No Limit - Level III (20/40) - 2026/09/01 10:15:00 EET [2026/09/01 3:15:00 ET]
+Table '4030000000 1' 3-max Seat #1 is the button
+Seat 1: Btn (1030 in chips)
+Seat 2: Bb (470 in chips)
+Btn: posts small blind 20
+Bb: posts big blind 40
+*** HOLE CARDS ***
+Dealt to Bb [Jc 8c]
+Btn: calls 20
+Bb: raises 40 to 80
+Btn: calls 40
+*** FLOP *** [Kc 3h 3s]
+Bb: bets 120
+Btn: calls 120
+*** TURN *** [Kc 3h 3s] [As]
+Bb: checks
+Btn: checks
+*** RIVER *** [Kc 3h 3s As] [7c]
+Bb: bets 270 and is all-in
+Btn: calls 270
+*** SHOW DOWN ***
+Bb: shows [Jc 8c] (a pair of Threes)
+Btn: shows [4s Kh] (two pair, Kings and Threes)
+Btn collected 940 from pot
+Bb finished the tournament in 2nd place
+Btn wins the tournament - congratulations!
+Btn wins a '$1.00 Power Path Step 2 Ticket' ticket
+*** SUMMARY ***
+Total pot 940 | Rake 0
+Board [Kc 3h 3s As 7c]
+Seat 1: Btn (button) (small blind) showed [4s Kh] and won (940) with two pair, Kings and Threes
+Seat 2: Bb (big blind) showed [Jc 8c] and lost with a pair of Threes
