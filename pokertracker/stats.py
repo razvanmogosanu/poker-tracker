@@ -669,6 +669,15 @@ def pot_buckets(conn, hero, window: Window | None = None) -> list[dict]:
 
 
 def street_funnel(conn, hero, window: Window | None = None) -> list[dict]:
+    """The funnel bars are cumulative; the money attached to them is not.
+
+    A cumulative net -- "the 457 hands that saw a flop are worth +479.8 bb" --
+    includes everything that happened on later streets, so the only way to read
+    it is to subtract adjacent rows in your head, and nobody does. Each row
+    therefore also carries the hands that *ended* at that stage and what they
+    were worth, which is the figure that says something new: hands that die on
+    the flop are their own bucket and their own leak.
+    """
     wsql, wp = _win(window)
     row = conn.execute(
         f"""SELECT COUNT(*) dealt, SUM(hp.saw_flop) f, SUM(hp.saw_turn) t,
@@ -677,24 +686,39 @@ def street_funnel(conn, hero, window: Window | None = None) -> list[dict]:
             WHERE hp.player = ? AND {wsql}""",
         (hero, *wp),
     ).fetchone()
-    money = {}
-    for label, cond in [("dealt", "1=1"), ("flop", "hp.saw_flop=1"),
-                        ("turn", "hp.saw_turn=1"), ("river", "hp.saw_river=1"),
-                        ("showdown", "hp.wtsd=1")]:
-        m = conn.execute(
-            f"""SELECT SUM(r.net * 1.0 / h.bb) net FROM hand_player hp
-                JOIN hands h ON h.hand_id = hp.hand_id
-                JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
-                WHERE hp.player = ? AND {cond} AND {wsql}""",
-            (hero, *wp),
-        ).fetchone()
-        money[label] = m["net"] or 0.0
+    # Exit stage: the last street the hand reached for us. Showdown is an
+    # outcome, not a sixth street -- reaching the river and folding to a river
+    # bet is an exit on the river. The five buckets partition the dealt hands,
+    # so the exit money sums back to the overall net.
+    exits = {r["exit_at"]: r for r in conn.execute(
+        f"""SELECT CASE WHEN hp.wtsd = 1 THEN 'showdown'
+                        WHEN hp.saw_river = 1 THEN 'river'
+                        WHEN hp.saw_turn = 1 THEN 'turn'
+                        WHEN hp.saw_flop = 1 THEN 'flop'
+                        ELSE 'preflop' END AS exit_at,
+                   COUNT(*) n, SUM(r.net * 1.0 / h.bb) net
+            FROM hand_player hp
+            JOIN hands h ON h.hand_id = hp.hand_id
+            JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+            WHERE hp.player = ? AND {wsql}
+            GROUP BY exit_at""",
+        (hero, *wp),
+    ).fetchall()}
+
+    def bucket(key, stage, hands, exit_label):
+        e = exits.get(key)
+        n = e["n"] if e else 0
+        net = ((e["net"] if e else 0.0) or 0.0)
+        return {"stage": stage, "hands": hands or 0, "exit_label": exit_label,
+                "exit_hands": n, "exit_bb": net,
+                "exit_bb_hand": net / n if n else None}
+
     return [
-        {"stage": "Dealt", "hands": row["dealt"], "net_bb": money["dealt"]},
-        {"stage": "Saw flop", "hands": row["f"] or 0, "net_bb": money["flop"]},
-        {"stage": "Saw turn", "hands": row["t"] or 0, "net_bb": money["turn"]},
-        {"stage": "Saw river", "hands": row["rv"] or 0, "net_bb": money["river"]},
-        {"stage": "Showdown", "hands": row["sd"] or 0, "net_bb": money["showdown"]},
+        bucket("preflop", "Dealt", row["dealt"], "ends preflop"),
+        bucket("flop", "Saw flop", row["f"], "ends on flop"),
+        bucket("turn", "Saw turn", row["t"], "ends on turn"),
+        bucket("river", "Saw river", row["rv"], "ends on river"),
+        bucket("showdown", "Showdown", row["sd"], "reached showdown"),
     ]
 
 

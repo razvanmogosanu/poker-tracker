@@ -1238,7 +1238,11 @@ over weeks.{roll_caveat}</p>
 <div class="card">{charts.rolling_trend(roll, TARGETS)}</div>
 
 <h2>8. Street funnel</h2>
-<p class="note">Where in the hand your money actually moves.</p>
+<p class="note">Where in the hand your money actually moves. The bars and
+the reached count are cumulative -- the funnel shape is what they are for --
+but the money is not: each row is the net of the hands that <em>ended</em> at
+that stage, so no subtraction is needed to read it. The flop row is the one
+that appears nowhere else in this report.</p>
 <div id="r-funnel">{a['r-funnel']}</div>
 
 <h2>9. Pot-size buckets</h2>

@@ -159,6 +159,12 @@ point of use, not just in the README:
 - The preflop aggressor is the *last* preflop raiser; a limped pot has no PFA
   and therefore no c-bet opportunity for anyone.
 - An opportunity is counted at most once per hand per player.
+- The street funnel's bars and hand counts are cumulative; the money on them
+  is not. Each row carries the net of the hands that *ended* at that stage, so
+  the five buckets partition the dealt hands and sum back to the overall net.
+  A cumulative bb column can only be read by subtracting adjacent rows, which
+  nobody does, so it reads as noise; the flop row -- what hands that die on the
+  flop cost -- appears nowhere else in the report.
 
 ## Evaluator and equity
 

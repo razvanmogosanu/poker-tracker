@@ -361,29 +361,46 @@ def rolling_trend(rows, targets: dict) -> str:
 
 
 def funnel(stages) -> str:
+    """Cumulative bars, incremental money.
+
+    The bars answer "how far did the hands get"; the columns answer "what did
+    the hands that stopped here cost", which is the question a cumulative
+    column could only answer by subtraction.
+    """
     if not stages or not stages[0]["hands"]:
         return '<p class="empty">No hands yet.</p>'
     top = stages[0]["hands"]
-    rowh, gap = 46, 12
-    h = len(stages) * (rowh + gap) + 20
-    left, right = 150, W - 190
-    out = []
+    rowh, gap, head = 44, 12, 26
+    h = head + len(stages) * (rowh + gap) + 12
+    left, right = 132, 500
+    cols = [(596, "Reached"), (690, "Ended here"), (790, "Net bb"), (884, "bb/hand")]
+    out = [f'<text class="tick small" x="{x}" y="{head - 10}" '
+           f'text-anchor="end">{esc(t)}</text>' for x, t in cols]
     for i, s in enumerate(stages):
-        y = 8 + i * (rowh + gap)
+        y = head + i * (rowh + gap)
+        mid = y + rowh / 2 + 4
         frac = s["hands"] / top if top else 0
         width = max(2.0, frac * (right - left))
+        cls = "pos" if s["exit_bb"] >= 0 else "neg"
         out.append(
             f'<rect class="funnel step{i}" x="{left}" y="{y}" width="{width:.1f}" '
-            f'height="{rowh}" rx="4"><title>{esc(s["stage"])}: {s["hands"]} hands '
-            f'({frac * 100:.1f}%), {fmt(s["net_bb"], 1)} bb</title></rect>'
+            f'height="{rowh}" rx="4"><title>{esc(s["stage"])}: {s["hands"]:,} hands '
+            f'({frac * 100:.1f}%). {s["exit_hands"]:,} of these {esc(s["exit_label"])}, '
+            f'worth {fmt(s["exit_bb"], 1)} bb '
+            f'({fmt(s["exit_bb_hand"], 2)} bb/hand)</title></rect>'
         )
         out.append(f'<text class="funnel-label" x="{left - 12}" '
-                   f'y="{y + rowh / 2 + 4}" text-anchor="end">{esc(s["stage"])}</text>')
-        out.append(f'<text class="funnel-value" x="{left + width + 12:.1f}" '
-                   f'y="{y + rowh / 2 - 2}">{s["hands"]} ({frac * 100:.0f}%)</text>')
-        cls = "pos" if s["net_bb"] >= 0 else "neg"
-        out.append(f'<text class="funnel-money {cls}" x="{left + width + 12:.1f}" '
-                   f'y="{y + rowh / 2 + 14}">{fmt(s["net_bb"], 1)} bb</text>')
+                   f'y="{mid - 6}" text-anchor="end">{esc(s["stage"])}</text>')
+        out.append(f'<text class="tick small" x="{left - 12}" y="{mid + 9}" '
+                   f'text-anchor="end">{esc(s["exit_label"])}</text>')
+        out.append(f'<text class="funnel-value" x="{cols[0][0]}" y="{mid}" '
+                   f'text-anchor="end">{s["hands"]:,} ({frac * 100:.0f}%)</text>')
+        out.append(f'<text class="funnel-value" x="{cols[1][0]}" y="{mid}" '
+                   f'text-anchor="end">{s["exit_hands"]:,}</text>')
+        out.append(f'<text class="funnel-money {cls}" x="{cols[2][0]}" y="{mid}" '
+                   f'text-anchor="end">{fmt(s["exit_bb"], 1)}</text>')
+        out.append(f'<text class="funnel-money {cls}" x="{cols[3][0]}" y="{mid}" '
+                   f'text-anchor="end">{fmt(s["exit_bb_hand"], 2)}</text>')
     return svg("".join(out), h=h)
 
 

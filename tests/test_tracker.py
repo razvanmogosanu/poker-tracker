@@ -445,6 +445,64 @@ class TestBigPots(unittest.TestCase):
         self.conn.rollback()
 
 
+class TestStreetFunnel(unittest.TestCase):
+    """The funnel's bars are cumulative; the money on them is not.
+
+    A cumulative bb column can only be read by subtracting adjacent rows, so
+    each row carries the hands that *ended* at its stage instead. That makes
+    the five money figures a partition of the dealt hands, and this is the test
+    for it: the exit buckets must account for every hand exactly once and add
+    back up to the player's overall net.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = sqlite3.connect(":memory:")
+        cls.conn.row_factory = sqlite3.Row
+        cls.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(cls.conn, hand, str(path))
+        derive.rebuild(cls.conn)
+        cls.players = [r[0] for r in cls.conn.execute(
+            "SELECT DISTINCT player FROM hand_player ORDER BY player")]
+
+    def test_exit_buckets_partition_the_dealt_hands(self):
+        for p in self.players:
+            with self.subTest(player=p):
+                rows = stats.street_funnel(self.conn, p)
+                self.assertEqual(sum(r["exit_hands"] for r in rows),
+                                 rows[0]["hands"])
+
+    def test_exit_bucket_is_the_gap_to_the_next_stage(self):
+        for p in self.players:
+            with self.subTest(player=p):
+                rows = stats.street_funnel(self.conn, p)
+                for a, b in zip(rows, rows[1:]):
+                    self.assertEqual(a["exit_hands"], a["hands"] - b["hands"])
+                # Nothing survives past showdown.
+                self.assertEqual(rows[-1]["exit_hands"], rows[-1]["hands"])
+
+    def test_exit_money_sums_to_the_overall_net(self):
+        for p in self.players:
+            with self.subTest(player=p):
+                rows = stats.street_funnel(self.conn, p)
+                m = stats.money_summary(self.conn, p)
+                if not m["hands"]:
+                    continue
+                self.assertAlmostEqual(sum(r["exit_bb"] for r in rows),
+                                       m["net_bb"], places=6)
+
+    def test_bb_per_hand_is_the_bucket_divided_by_its_count(self):
+        for p in self.players:
+            rows = stats.street_funnel(self.conn, p)
+            for r in rows:
+                if r["exit_hands"]:
+                    self.assertAlmostEqual(r["exit_bb_hand"],
+                                           r["exit_bb"] / r["exit_hands"])
+                else:
+                    self.assertIsNone(r["exit_bb_hand"])
+
 class TestSessionBoundaries(unittest.TestCase):
     """Sessions are assigned once at ingest, and must not move afterwards."""
 
