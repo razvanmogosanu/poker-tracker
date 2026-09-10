@@ -518,3 +518,110 @@ def reliability(hands: int) -> list[dict]:
     return [{"stat": name, "needed": n, "have": hands,
              "ready": hands >= n, "pct": min(100.0, 100.0 * hands / n)}
             for name, n in RELIABILITY]
+
+
+# --------------------------------------------------------------------------
+# hand-level drill-down
+
+
+def _exit_street(row) -> str:
+    """The last street on which the hero was still in the hand.
+
+    `saw_river` already means "the river was dealt and the hero had not folded
+    before it", so the ladder reads straight off the flags. Showdown is a
+    separate outcome rather than a fifth street: reaching the river and folding
+    to a river bet is an exit on the river, not at showdown.
+    """
+    if row["reached_showdown"]:
+        return "showdown"
+    if row["saw_river"]:
+        return "river"
+    if row["saw_turn"]:
+        return "turn"
+    if row["saw_flop"]:
+        return "flop"
+    return "preflop"
+
+
+def _outcome(row) -> str:
+    """won / lost at showdown / folded / opponent folded.
+
+    Order matters: a player who folds can still be at showdown in no sense, but
+    a player who was all-in and cashed out neither folded nor showed down, so
+    that case is named rather than swallowed into "no showdown".
+    """
+    if row["reached_showdown"]:
+        return "won at showdown" if row["won_pot"] else "lost at showdown"
+    if row["folded"]:
+        return "folded"
+    if row["cashed_out"]:
+        return "cashed out"
+    if row["won_pot"]:
+        return "opponent folded"
+    return "no showdown"
+
+
+def big_pots(conn: sqlite3.Connection, hero: str, limit: int = 15) -> dict:
+    """The biggest winning and losing hands, with everything needed to review them.
+
+    Every aggregate in this report ends in "go look at those hands"; this is the
+    list. Rows are ordered by net bb and the two directions are pulled with one
+    query each so a hand can never appear in both.
+    """
+    sql = """
+        SELECT h.hand_id, h.site_hand_no, h.played_at, h.table_name, h.bb,
+               h.board_flop, h.board_turn, h.board_river,
+               h.total_pot * 1.0 / h.bb  AS pot_bb,
+               r.net * 1.0 / h.bb        AS net_bb,
+               r.net                     AS net_cents,
+               r.reached_showdown, r.cashed_out, r.won_pot,
+               hp.position, hp.hole_combo,
+               hp.saw_flop, hp.saw_turn, hp.saw_river,
+               s.hole_cards,
+               EXISTS (SELECT 1 FROM actions a
+                       WHERE a.hand_id = h.hand_id AND a.player = hp.player
+                         AND a.action = 'fold') AS folded
+        FROM hands h
+        JOIN results r      ON r.hand_id = h.hand_id AND r.player = ?
+        JOIN hand_player hp ON hp.hand_id = h.hand_id AND hp.player = ?
+        LEFT JOIN seats s   ON s.hand_id = h.hand_id AND s.player = ?
+        ORDER BY net_bb {dir}, h.hand_id
+        LIMIT ?
+    """
+    out = {}
+    for key, direction in (("losses", "ASC"), ("wins", "DESC")):
+        rows = conn.execute(sql.format(dir=direction),
+                            (hero, hero, hero, limit)).fetchall()
+        out[key] = [_drilldown_row(conn, r, hero) for r in rows
+                    if (r["net_bb"] < 0 if key == "losses" else r["net_bb"] > 0)]
+    return out
+
+
+def _drilldown_row(conn, r, hero: str) -> dict:
+    # The board is blank when the hero folded preflop: cards that arrived after
+    # a fold are not part of the decision being reviewed.
+    board = ""
+    if r["saw_flop"]:
+        board = " ".join(x for x in (r["board_flop"], r["board_turn"],
+                                     r["board_river"]) if x)
+    shown = conn.execute(
+        """SELECT player, hole_cards FROM seats
+           WHERE hand_id = ? AND player <> ? AND hole_cards <> ''
+           ORDER BY seat_no""",
+        (r["hand_id"], hero),
+    ).fetchall()
+    return {
+        "hand_id": r["hand_id"],
+        "site_hand_no": r["site_hand_no"],
+        "played_at": r["played_at"],
+        "table_name": r["table_name"] or "",
+        "position": r["position"] or "",
+        "hole_cards": r["hole_cards"] or "",
+        "hole_combo": r["hole_combo"] or "",
+        "board": board,
+        "pot_bb": r["pot_bb"],
+        "net_bb": r["net_bb"],
+        "exit_street": _exit_street(r),
+        "outcome": _outcome(r),
+        "shown": [{"player": s["player"], "cards": s["hole_cards"]} for s in shown],
+    }

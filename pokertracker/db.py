@@ -282,3 +282,45 @@ def detect_hero(conn: sqlite3.Connection) -> str:
         "SELECT hero, COUNT(*) n FROM hands WHERE hero <> '' GROUP BY hero ORDER BY n DESC LIMIT 1"
     ).fetchone()
     return row["hero"] if row else ""
+
+
+def hand_texts(conn: sqlite3.Connection, hand_ids) -> dict[int, str]:
+    """Fetch the original text block for a handful of hands.
+
+    Raw text is not stored in the database -- the histories are the source of
+    truth and duplicating them would double the DB for no gain. Instead the
+    source file is re-read and re-split on demand, which is only worth doing
+    for the few dozen hands a drill-down table actually shows. A file that has
+    since been moved or deleted yields no text rather than an error.
+    """
+    hand_ids = list(hand_ids)
+    if not hand_ids:
+        return {}
+    placeholders = ",".join("?" * len(hand_ids))
+    rows = conn.execute(
+        f"SELECT hand_id, site_hand_no, source_file FROM hands"
+        f" WHERE hand_id IN ({placeholders})",
+        hand_ids,
+    ).fetchall()
+
+    wanted: dict[str, dict[str, int]] = {}
+    for r in rows:
+        if r["source_file"]:
+            wanted.setdefault(r["source_file"], {})[r["site_hand_no"]] = r["hand_id"]
+
+    from .parser import split_hands
+
+    out: dict[int, str] = {}
+    for path, by_no in wanted.items():
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for block in split_hands(text):
+            head = block.split("\n", 1)[0]
+            for no, hand_id in by_no.items():
+                if f"#{no}" in head:
+                    out[hand_id] = block
+                    break
+    return out

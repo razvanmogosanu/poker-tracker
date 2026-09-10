@@ -215,6 +215,13 @@ The four-line winnings chart is the reason trackers exist. The rest supports it.
   High WWSF with low WTSD is fine, but check the red line supports it.
 - **Pot-size buckets** are the fastest read in the report. Losses concentrated
   in the top bucket mean the problem is stack-off decisions, not preflop ranges.
+- **Biggest pots** is where every other section ends up. Each aggregate finding
+  is really an instruction to go and look at some hands, and this is the list:
+  the fifteen largest losses and fifteen largest wins by net big blinds, with
+  position, hole cards, board, exit street, outcome and whatever the opponent
+  showed. Any column re-sorts, and clicking a hand number opens the original
+  PokerStars text inline. The board is blank when the hand was folded preflop,
+  because cards that arrived after the fold are not part of the decision.
 
 Every displayed rate carries a 95% confidence interval, and the win rate carries
 one prominently, because at 10,000 hands a measured +5 bb/100 is statistically

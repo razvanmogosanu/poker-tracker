@@ -170,6 +170,13 @@ change the palette.
 `TARGETS` at the top of `report.py` are strategy reference lines drawn on the
 rolling-discipline chart, not measurements.
 
+**Raw hand text is not stored in the database.** The histories are the source of
+truth and duplicating them would roughly double `poker.db` for no gain, so
+`db.hand_texts()` re-reads the source file and re-splits it on demand. That is
+only worth doing for the few dozen hands the biggest-pots drill-down shows;
+never call it over a whole result set. A source file that has since moved
+yields no text rather than an error, and the report says so in the panel.
+
 ## Sample size
 
 The report attaches a confidence interval to every displayed rate, and the

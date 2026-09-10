@@ -148,6 +148,19 @@ def cmd_stats(args) -> int:
         print(f"  {mark} {r['stat']:<30} {r['have']:>7} / {r['needed']:<7} "
               f"({r['pct']:.0f}%)")
 
+    pots = stats.big_pots(conn, hero, 10)
+    for label, key in (("Biggest losses", "losses"), ("Biggest wins", "wins")):
+        rows = pots[key]
+        if not rows:
+            continue
+        print(f"\n{label}")
+        print("-" * 100)
+        for r in rows:
+            print(f"  #{r['site_hand_no']:<13}{r['played_at'][5:16]}  "
+                  f"{r['position']:<4}{r['hole_cards'] or '--':<8}"
+                  f"{r['board'] or '':<16}pot {r['pot_bb']:6.1f}  "
+                  f"{r['net_bb']:+8.1f}bb  {r['exit_street']:<9}{r['outcome']}")
+
     sess = stats.sessions(conn, hero)
     print(f"\nSessions: {len(sess)}   timeouts: {stats.timeouts(conn, hero)}")
     for s in sess[-10:]:

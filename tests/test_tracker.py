@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pokertracker import db, derive  # noqa: E402
+from pokertracker import db, derive, stats  # noqa: E402
 from pokertracker.parser import parse_file, parse_money  # noqa: E402
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
 
@@ -308,6 +308,102 @@ class TestDerivedFlags(unittest.TestCase):
         self.assertEqual((f["wtsd"], f["wsd"]), (1, 1))
         loser = self.flags("900000006", "Returner")
         self.assertEqual((loser["wtsd"], loser["wsd"]), (1, 0))
+
+
+class TestBigPots(unittest.TestCase):
+    """The hand-level drill-down. Every column is a claim about one hand."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = sqlite3.connect(":memory:")
+        cls.conn.row_factory = sqlite3.Row
+        cls.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(cls.conn, hand, str(path))
+        derive.rebuild(cls.conn)
+
+    def row(self, player: str, hand_no: str):
+        pots = stats.big_pots(self.conn, player, 50)
+        for r in pots["losses"] + pots["wins"]:
+            if r["site_hand_no"] == hand_no:
+                return r
+        self.fail(f"{player} has no drill-down row for {hand_no}")
+
+    def test_showdown_winner_carries_the_board_and_the_shown_cards(self):
+        r = self.row("Utg", "900000006")
+        self.assertEqual(r["exit_street"], "showdown")
+        self.assertEqual(r["outcome"], "won at showdown")
+        self.assertEqual(r["hole_cards"], "Ah Kh")
+        self.assertEqual(r["board"], "2c 7d 9s Kc 4h")
+        self.assertIn(("Returner", "5d 5c"),
+                      [(x["player"], x["cards"]) for x in r["shown"]])
+
+    def test_showdown_loser(self):
+        r = self.row("Returner", "900000006")
+        self.assertEqual((r["exit_street"], r["outcome"]),
+                         ("showdown", "lost at showdown"))
+
+    def test_taking_it_down_uncontested_is_not_a_showdown_win(self):
+        r = self.row("Button", "900000002")
+        self.assertEqual((r["exit_street"], r["outcome"]), ("flop", "opponent folded"))
+
+    def test_folding_to_a_cbet_exits_on_the_flop(self):
+        r = self.row("Big", "900000002")
+        self.assertEqual((r["exit_street"], r["outcome"]), ("flop", "folded"))
+
+    def test_a_preflop_fold_shows_no_board(self):
+        # The small blind, not the cutoff: a fold that cost nothing has a net of
+        # zero and is deliberately not a "biggest pot" in either direction.
+        r = self.row("Small", "900000002")
+        self.assertEqual(r["exit_street"], "preflop")
+        self.assertEqual(r["board"], "")
+
+    def test_a_cash_out_is_named_rather_than_called_a_showdown(self):
+        pots = stats.big_pots(self.conn, "Insurer", 50)
+        rows = [r for r in pots["losses"] + pots["wins"]
+                if r["site_hand_no"] == "900000008"]
+        self.assertTrue(rows, "the cashing-out player should appear")
+        self.assertNotIn(rows[0]["outcome"], ("folded",))
+
+    def test_losses_and_wins_are_disjoint_and_correctly_signed(self):
+        pots = stats.big_pots(self.conn, "Utg", 50)
+        self.assertTrue(all(r["net_bb"] < 0 for r in pots["losses"]))
+        self.assertTrue(all(r["net_bb"] > 0 for r in pots["wins"]))
+        ids = [r["hand_id"] for r in pots["losses"] + pots["wins"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_ordered_by_size_outwards_from_zero(self):
+        pots = stats.big_pots(self.conn, "Utg", 50)
+        for key in ("losses", "wins"):
+            nets = [abs(r["net_bb"]) for r in pots[key]]
+            self.assertEqual(nets, sorted(nets, reverse=True), key)
+
+    def test_limit_is_respected(self):
+        pots = stats.big_pots(self.conn, "Utg", 1)
+        self.assertLessEqual(len(pots["losses"]), 1)
+        self.assertLessEqual(len(pots["wins"]), 1)
+
+    def test_raw_text_round_trips_from_the_source_file(self):
+        pots = stats.big_pots(self.conn, "Utg", 50)
+        ids = [r["hand_id"] for r in pots["losses"] + pots["wins"]]
+        texts = db.hand_texts(self.conn, ids)
+        self.assertTrue(texts)
+        for hand_id, text in texts.items():
+            self.assertTrue(text.startswith("PokerStars Hand #"))
+        # Every block must be the hand that was asked for, not its neighbour.
+        by_id = {r["hand_id"]: r["site_hand_no"]
+                 for r in pots["losses"] + pots["wins"]}
+        for hand_id, text in texts.items():
+            self.assertIn("#" + by_id[hand_id], text.splitlines()[0])
+
+    def test_missing_source_file_yields_no_text_rather_than_an_error(self):
+        self.conn.execute("UPDATE hands SET source_file = ? WHERE site_hand_no = ?",
+                          ("/nonexistent/history.txt", "900000001"))
+        row = self.conn.execute(
+            "SELECT hand_id FROM hands WHERE site_hand_no = '900000001'").fetchone()
+        self.assertEqual(db.hand_texts(self.conn, [row["hand_id"]]), {})
+        self.conn.rollback()
 
 
 class TestLiveHistory(unittest.TestCase):

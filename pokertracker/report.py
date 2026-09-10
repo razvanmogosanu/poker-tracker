@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 
-from . import charts, stats
+from . import charts, db, stats
 from .charts import esc, fmt
 from .positions import POSITION_ORDER
 
@@ -206,6 +207,36 @@ footer { margin-top: 46px; color: var(--muted); font-size: 12.5px; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .auto { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.hands th.sortable-col { cursor: pointer; user-select: none; white-space: nowrap; }
+.hands th.sortable-col:hover { color: var(--ink-2); }
+.hands th.sortable-col::after { content: ' \\2195'; opacity: .25; }
+.hands th.sortable-col[aria-sort="ascending"]::after { content: ' \\25B2'; opacity: .9; }
+.hands th.sortable-col[aria-sort="descending"]::after { content: ' \\25BC'; opacity: .9; }
+.hands td.cards, .hands td.board { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: .02em; }
+.hands td.board { color: var(--ink-2); }
+.hands td.money.pos { color: var(--pos); } .hands td.money.neg { color: var(--neg); }
+.hands td.when { white-space: nowrap; }
+.hands td.when small { display: block; color: var(--muted); font-size: 11.5px; }
+.hands td.opp { color: var(--ink-2); font-size: 12.5px; }
+.hand-btn {
+  font: inherit; font-size: 12.5px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--ink-2); border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.hand-btn:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+.hand-btn[aria-expanded="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.raw-panel { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.raw-panel .raw-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 12.5px; color: var(--muted); }
+.raw-panel pre {
+  margin: 0; padding: 12px 14px; border-radius: 8px; overflow-x: auto;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.45; white-space: pre;
+}
+.tag { display:inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; white-space: nowrap;
+  background: color-mix(in srgb, var(--muted) 14%, transparent); color: var(--ink-2); }
+.tag.win { background: color-mix(in srgb, var(--pos) 16%, transparent); color: var(--pos); }
+.tag.loss { background: color-mix(in srgb, var(--neg) 16%, transparent); color: var(--neg); }
 @media (max-width: 640px) { body { padding: 18px 12px 60px; } .tile .v { font-size: 23px; } }
 """
 
@@ -348,6 +379,71 @@ JS = """
     paint();
   });
 
+
+  // ---- biggest pots: table switch, column sort, raw-text panel
+  $$('[data-drilldown]').forEach(function (wrap) {
+    const raws = JSON.parse(wrap.dataset.payload);
+    const panel = $('.raw-panel', wrap);
+    const pre = $('pre', panel), head = $('.raw-head span', panel);
+
+    $$('.chip[data-tbl]', wrap).forEach(function (b) {
+      b.addEventListener('click', function () {
+        $$('.chip[data-tbl]', wrap).forEach(o =>
+          o.setAttribute('aria-pressed', String(o === b)));
+        $$('table.hands', wrap).forEach(t => { t.hidden = t.dataset.tbl !== b.dataset.tbl; });
+        // The open hand belongs to the table being switched away from.
+        $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
+        panel.hidden = true;
+      });
+    });
+
+    // Sort on any column. Numeric columns carry data-v so "-12.4" and a blank
+    // cell order correctly regardless of how they are formatted for display.
+    $$('table.hands', wrap).forEach(function (table) {
+      const body = $('tbody', table);
+      $$('th.sortable-col', table).forEach(function (th, idx) {
+        th.addEventListener('click', function () {
+          const num = th.dataset.type === 'num';
+          const desc = th.getAttribute('aria-sort') !== 'descending';
+          const rows = $$('tr', body);
+          rows.sort(function (a, b) {
+            const ca = a.children[idx], cb = b.children[idx];
+            let x, y;
+            if (num) {
+              x = parseFloat(ca.dataset.v); y = parseFloat(cb.dataset.v);
+              if (isNaN(x)) x = -Infinity;
+              if (isNaN(y)) y = -Infinity;
+            } else {
+              x = (ca.dataset.v || ca.textContent).trim().toLowerCase();
+              y = (cb.dataset.v || cb.textContent).trim().toLowerCase();
+            }
+            if (x < y) return desc ? 1 : -1;
+            if (x > y) return desc ? -1 : 1;
+            return 0;
+          });
+          rows.forEach(r => body.appendChild(r));
+          $$('th.sortable-col', table).forEach(o => o.removeAttribute('aria-sort'));
+          th.setAttribute('aria-sort', desc ? 'descending' : 'ascending');
+        });
+      });
+    });
+
+    $$('.hand-btn', wrap).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const open = btn.getAttribute('aria-expanded') === 'true';
+        $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
+        if (open) { panel.hidden = true; return; }
+        btn.setAttribute('aria-expanded', 'true');
+        const txt = raws[btn.dataset.hand];
+        head.textContent = txt ? ('Hand #' + btn.dataset.no)
+          : ('Hand #' + btn.dataset.no + ' — source file no longer readable');
+        pre.textContent = txt || '';
+        panel.hidden = false;
+        panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    });
+  });
+
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
     $$('.heatmap .chip[aria-pressed="true"]').forEach(b => b.click());
   });
@@ -442,6 +538,82 @@ def _rate_table(rows, caption: str = "") -> str:
     )
 
 
+HAND_COLUMNS = [
+    ("Hand", "text"), ("Time, table", "text"), ("Pos", "text"), ("Cards", "text"),
+    ("Board", "text"), ("Pot (bb)", "num"), ("Net (bb)", "num"),
+    ("Exit", "num"), ("Result", "text"), ("Shown", "text"),
+]
+
+# The order the streets actually happen in, so sorting the Exit column reads as
+# a progression through the hand rather than alphabetically as flop/preflop/river.
+_EXIT_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
+
+
+def _hand_rows(rows) -> str:
+    out = []
+    for r in rows:
+        tag = "win" if r["net_bb"] > 0 else "loss"
+        shown = ", ".join(f"{x['player']} {x['cards']}" for x in r["shown"])
+        out.append(
+            "<tr>"
+            f"<td><button type=\"button\" class=\"hand-btn\" data-hand=\"{r['hand_id']}\" "
+            f"data-no=\"{esc(r['site_hand_no'])}\" aria-expanded=\"false\" "
+            f"title=\"Show the raw hand history\">#{esc(r['site_hand_no'])}</button></td>"
+            f"<td class=\"when\" data-v=\"{esc(r['played_at'])}\">{esc(r['played_at'][:16])}"
+            f"<small>{esc(r['table_name'])}</small></td>"
+            f"<td>{esc(r['position'])}</td>"
+            f"<td class=\"cards\">{esc(r['hole_cards'])}</td>"
+            f"<td class=\"board\">{esc(r['board'])}</td>"
+            f"<td data-v=\"{r['pot_bb']:.4f}\">{r['pot_bb']:.1f}</td>"
+            f"<td class=\"money {'pos' if r['net_bb'] > 0 else 'neg'}\" "
+            f"data-v=\"{r['net_bb']:.4f}\">{r['net_bb']:+.1f}</td>"
+            f"<td data-v=\"{_EXIT_RANK.get(r['exit_street'], 9)}\">{esc(r['exit_street'])}</td>"
+            f"<td><span class=\"tag {tag}\">{esc(r['outcome'])}</span></td>"
+            f"<td class=\"opp\">{esc(shown)}</td>"
+            "</tr>"
+        )
+    return "".join(out)
+
+
+def _hand_table(rows, key: str, hidden: bool) -> str:
+    if not rows:
+        return (f'<table class="hands" data-tbl="{key}"{" hidden" if hidden else ""}>'
+                f'<tbody><tr><td class="empty">No hands in this direction yet.</td>'
+                f'</tr></tbody></table>')
+    head = "".join(
+        f'<th class="sortable-col" data-type="{typ}">{esc(name)}</th>'
+        for name, typ in HAND_COLUMNS
+    )
+    return (f'<table class="hands" data-tbl="{key}"{" hidden" if hidden else ""}>'
+            f'<thead><tr>{head}</tr></thead><tbody>{_hand_rows(rows)}</tbody></table>')
+
+
+def _drilldown(conn, hero: str, limit: int = 15) -> str:
+    """Top losses and top wins, each row expandable to the original text.
+
+    The raw text is inlined rather than linked because the report is a single
+    self-contained file: a file:// link into the history folder would break the
+    moment the report is copied anywhere.
+    """
+    pots = stats.big_pots(conn, hero, limit)
+    ids = [r["hand_id"] for r in pots["losses"] + pots["wins"]]
+    raws = db.hand_texts(conn, ids)
+    payload = json.dumps({str(k): v for k, v in raws.items()})
+    n_loss, n_win = len(pots["losses"]), len(pots["wins"])
+    return f"""<div class="card" data-drilldown data-payload='{esc(payload)}'>
+<div class="chip-row"><span class="chip-label">Show</span>
+<button type="button" class="chip" data-tbl="losses" aria-pressed="true">
+Top {n_loss} losses</button>
+<button type="button" class="chip" data-tbl="wins" aria-pressed="false">
+Top {n_win} wins</button></div>
+{_hand_table(pots['losses'], 'losses', False)}
+{_hand_table(pots['wins'], 'wins', True)}
+<p class="note">Click any column heading to re-sort; click a hand number to read
+the original PokerStars text.</p>
+<div class="raw-panel" hidden><div class="raw-head"><span></span></div><pre></pre></div>
+</div>"""
+
+
 def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
     m = stats.money_summary(conn, hero)
     if not m.get("hands"):
@@ -462,6 +634,7 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
     tables = stats.by_table_count(conn, hero)
     hours = stats.by_time(conn, hero, "%H")
     days = stats.by_time(conn, hero, "%w")
+    drilldown = _drilldown(conn, hero)
     n_problems = stats.problem_count(conn)
 
     grids = {"All": stats.range_grid(conn, hero)}
@@ -688,7 +861,17 @@ hemorrhage in big ones. If the losses concentrate in the top bucket, the problem
 is stack-off decisions, not preflop ranges.</p>
 <div class="card">{charts.pot_buckets(buckets)}</div>
 
-<h2>10. Sessions</h2>
+<h2>10. Biggest pots</h2>
+<p class="note">Every other section ends in "go look at those hands"; this is
+where you look. Fifteen largest losses and fifteen largest wins by net big
+blinds, with the board, the exit street, and whatever the opponent showed. A
+pattern here &mdash; stacking off with one pair, folding rivers in the biggest
+pots, the same position over and over &mdash; carries more information than any
+aggregate on this page, because these are the hands the win rate is actually
+made of.</p>
+{drilldown}
+
+<h2>11. Sessions</h2>
 <p class="note">Each point is one session, split on a gap of more than 30
 minutes. Two or three months of data will tell you your real table limit.</p>
 <div class="card">{charts.session_scatter(sess)}
@@ -696,12 +879,12 @@ minutes. Two or three months of data will tell you your real table limit.</p>
 <table><thead><tr><th>Start</th><th>Duration</th><th>Hands</th><th>Tables</th>
 <th>bb/100</th></tr></thead><tbody>{sess_rows}</tbody></table></details></div>
 
-<h2>11. Effective stacks</h2>
+<h2>12. Effective stacks</h2>
 <p class="note">A one-off diagnostic. Once the distribution sits at 100bb you can
 retire this chart. Bars below 80bb are the ones to worry about.</p>
 <div class="card">{charts.stack_histogram(stacks)}</div>
 
-<h2>12. Table load, timing and attention</h2>
+<h2>13. Table load, timing and attention</h2>
 <div class="card">
 <h3>Concurrent tables</h3>
 <table><thead><tr><th>Load</th><th>Hands</th><th>bb/100</th></tr></thead>
@@ -717,7 +900,7 @@ retire this chart. Bars below 80bb are the ones to worry about.</p>
 a proxy for attention overload.</p>
 </div>
 
-<h2>13. Sample size</h2>
+<h2>14. Sample size</h2>
 <p class="note">Frequency stats converge far faster than results because they
 are bounded proportions. This is the argument for building a tracker around
 frequencies and compliance checks rather than around win rate.</p>
