@@ -119,7 +119,23 @@ in proportion to contribution.
 **Schema changes need a DB rebuild.** `db.SCHEMA` uses `CREATE TABLE IF NOT
 EXISTS`, so a new column will not appear in an existing `poker.db`. There are no
 migrations: delete `poker.db` (plus `-wal`/`-shm`) and re-import. Re-parsing is
-fast and the histories are the source of truth.
+fast and the histories are the source of truth. `db.connect()` checks for this
+and raises `StaleSchema` *before* running the schema script, because a stale
+`hands` table makes `SCHEMA`'s own index statements fail with a bare "no such
+column". Add any new column to `REQUIRED_HAND_COLUMNS` so the next person gets
+the message rather than the symptom.
+
+**Sessions are assigned at ingest, never per query.** `db.assign_sessions()`
+runs at the end of `import_paths` and stores a `session_id` on every hand,
+splitting on a gap of more than `SESSION_GAP_MINUTES` (30). It is written down
+rather than derived on demand because a boundary recomputed inside a filtered
+query would move whenever the filter changed, so "last session" would quietly
+mean a different set of hands from one refresh to the next. `stats.sessions()`
+reads the stored column for the same reason: the session list and the period
+filter must not be able to disagree. The scan covers every hand in the database,
+not one hero's, because sitting down is a fact about the clock. Session numbers
+are recomputed across the whole history on every import, since a late-arriving
+file can land between two hands already imported.
 
 ## Conventions worth preserving
 
@@ -153,6 +169,36 @@ Note for sanity checks: **AA vs KK preflop is 81.3% with all four suits
 distinct.** The widely quoted 82.4% is a different suit configuration. Test
 expectations here were wrong once; the code was not.
 
+## Periods
+
+A period filter is one predicate at the top of the pipeline, not a change to
+any stat. `stats.Window` is a SQL fragment over the `hands` alias `h` plus its
+parameters; `stats.Period` pairs a selected window with the prior one, and
+`stats.periods()` returns the options the data actually supports. Every
+aggregation in `stats.py` takes an optional `window` and applies it, which is
+why the test for the whole feature is a partition test: selected plus prior has
+to equal the unfiltered figure for every stat and every period.
+
+Windows are ordered by `(played_at, hand_id)`, never `played_at` alone.
+Multi-tabling puts several hands on the same second, and a tie broken
+arbitrarily would let one hand fall into both the selected window and the prior
+one, which would break exactly that partition property.
+
+Options that are empty, that cover the whole history, or that start at the same
+hand as an option already offered are dropped — after one evening, "last
+session", "last 24 hours" and "last 7 days" select the same hands, and three
+buttons that do the same thing are worse than one.
+
+**The filter must never default to anything but "All", and the win-rate tile is
+suppressed outright while it is active.** The pull with a period filter is to
+check today's number after every session; today's number is 100-300 hands with
+an interval of roughly +/-150 bb/100 on it. Frequencies converge in thousands of
+hands and are what the filtered view is for. `MIN_OPPS` (30) is the floor below
+which a delta against the prior period is shown as a dash: the difference
+between two noisy rates is noisier than either of them. Compliance checks carry
+a four-valued status for the same reason — `thin` says the window cannot answer
+the question, and is not the same claim as `off`.
+
 ## Report
 
 `report.build(conn, hero, live=False)`. `live=True` adds the Refresh toolbar and
@@ -169,6 +215,23 @@ change the palette.
 
 `TARGETS` at the top of `report.py` are strategy reference lines drawn on the
 rolling-discipline chart, not measurements.
+
+**Every period is rendered server-side and swapped in the browser.** The report
+has to open from `file://` with no server behind it, so recomputing on selection
+is not available: `_fragments()` renders each period's markup once and the whole
+set travels in a `<script type="application/json">` block that `_json_script()`
+escapes so it cannot terminate its own element. Anything bound with an event
+listener inside a swapped region has to be re-bound afterwards, which is why the
+drill-down's handlers live in `initDrilldown(root)` rather than inline.
+
+The two cumulative charts and the session list are the exception: they always
+show the whole history, with the selected period drawn as a shaded band. A
+single session plotted on its own axis is unreadable, and the only useful thing
+it can say is where it sits relative to everything before it. The band is
+positioned from the chart's *data domain*, not its pixel width — `nice_ticks`
+pads the x axis out to a round number past the last hand, so a band placed by
+pixel fraction lands in the wrong place. The band is hidden by zero width rather
+than `hidden`, because the HTML `[hidden]` rule does not apply to SVG elements.
 
 **Raw hand text is not stored in the database.** The histories are the source of
 truth and duplicating them would roughly double `poker.db` for no gain, so

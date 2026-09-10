@@ -45,9 +45,13 @@ CREATE TABLE IF NOT EXISTS hands (
     rake           INTEGER NOT NULL DEFAULT 0,
     cashout_fee    INTEGER NOT NULL DEFAULT 0,
     cashout_residual INTEGER NOT NULL DEFAULT 0,
-    source_file    TEXT
+    source_file    TEXT,
+    -- Assigned once at ingest by assign_sessions(); see the note there for
+    -- why this is stored rather than recomputed per query.
+    session_id     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_hands_time ON hands(played_at);
+CREATE INDEX IF NOT EXISTS ix_hands_session ON hands(session_id);
 CREATE INDEX IF NOT EXISTS ix_hands_table ON hands(table_name, played_at);
 
 CREATE TABLE IF NOT EXISTS seats (
@@ -129,11 +133,87 @@ CREATE TABLE IF NOT EXISTS source_files (
 """
 
 
+# A gap longer than this ends a session. Thirty minutes is long enough to
+# survive a table change or a break for coffee and short enough that two
+# separate evenings never merge into one.
+SESSION_GAP_MINUTES = 30
+
+
+class StaleSchema(RuntimeError):
+    """Raised when an existing database predates a schema change."""
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    # Before the script, not after: an outdated `hands` table makes SCHEMA's own
+    # index statements fail with "no such column", which says nothing useful.
+    _check_schema(conn)
     conn.executescript(SCHEMA)
     return conn
+
+
+# Columns added after the first release. A database without them is not
+# upgraded in place; see StaleSchema.
+REQUIRED_HAND_COLUMNS = {"session_id"}
+
+
+def _check_schema(conn: sqlite3.Connection) -> None:
+    """Fail loudly, and early, on a database that predates a column.
+
+    `SCHEMA` uses CREATE TABLE IF NOT EXISTS, so a new column silently does not
+    appear in an existing poker.db and every query against it fails somewhere
+    much further downstream. There are no migrations by design -- re-parsing is
+    fast and the histories are the source of truth -- so the fix is to delete
+    the file, and saying so here is cheaper than debugging the symptom.
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(hands)")}
+    if not have:
+        return  # a fresh database; SCHEMA is about to create everything
+    missing = REQUIRED_HAND_COLUMNS - have
+    if missing:
+        raise StaleSchema(
+            f"this database predates the {', '.join(sorted(missing))} column on "
+            f"`hands`. There are no migrations by design: delete the database "
+            f"(and its -wal/-shm files) and re-import. Re-parsing is fast, but "
+            f"note that all-in EV is recomputed from scratch too."
+        )
+
+
+def assign_sessions(conn: sqlite3.Connection,
+                    gap_minutes: int = SESSION_GAP_MINUTES) -> int:
+    """Number every hand into a session, splitting on a gap in wall-clock time.
+
+    This runs once at ingest and the answer is stored on the hand, which is the
+    whole point: a session boundary computed per query would move whenever
+    something else was loaded, so "last session" would quietly mean a different
+    set of hands from one refresh to the next. Stored, it means the same hands
+    until the histories themselves change.
+
+    The scan is over every hand in the database rather than one hero's, because
+    the boundary is a fact about when the player was sitting down, not about
+    which stat is being asked for. Returns the number of sessions.
+    """
+    from datetime import datetime
+
+    rows = conn.execute(
+        "SELECT hand_id, played_at FROM hands ORDER BY played_at, hand_id"
+    ).fetchall()
+    if not rows:
+        return 0
+
+    gap = gap_minutes * 60
+    updates, sid, prev = [], 0, None
+    for r in rows:
+        t = datetime.fromisoformat(r["played_at"])
+        if prev is None or (t - prev).total_seconds() > gap:
+            sid += 1
+        updates.append((sid, r["hand_id"]))
+        prev = t
+
+    conn.executemany("UPDATE hands SET session_id = ? WHERE hand_id = ?", updates)
+    conn.commit()
+    return sid
 
 
 def _rake_shares(hand: Hand) -> dict[str, int]:
@@ -270,6 +350,11 @@ def import_paths(conn: sqlite3.Connection, paths, hero_hint: str = "",
         stats["files"] += 1
         stats["hands"] += n
         conn.commit()
+
+    # Sessions are renumbered across the whole history rather than appended to,
+    # because a late-arriving file can land between two hands already imported.
+    if stats["files"]:
+        stats["sessions"] = assign_sessions(conn)
     return stats
 
 

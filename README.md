@@ -47,6 +47,7 @@ Other commands:
 | `import` | Parse histories into `poker.db` (add `--force` to re-read unchanged files) |
 | `derive` | Rebuild the derived flag table after changing a stat definition |
 | `stats` | Print everything to the terminal |
+| `stats --period session` | The same, restricted to one period (`all`, `session`, `day`, `week`, `n500`, `n1000`) |
 | `stats --problems` | List hands the parser could not balance or understand |
 | `ev` | Compute all-in EV only |
 | `report -o out.html` | Write the dashboard only |
@@ -62,7 +63,7 @@ Run the tests with `python -m unittest discover -s tests`.
 ```
 parser.py     hand-history text -> Hand/Seat/Action/Result objects
 positions.py  position derived from the button, never parsed
-db.py         SQLite schema and idempotent loader
+db.py         SQLite schema and idempotent loader; assigns session ids
 derive.py     replays actions into one flag row per (hand, player)
 stats.py      SQL aggregations, every rate carrying its own confidence interval
 evaluator.py  vectorized 7-card evaluator (numpy, table-driven)
@@ -74,6 +75,13 @@ report.py     assembles the dashboard
 The parser is deliberately dumb and the stat layer is separate. Parsing happens
 once; everything else recomputes from the database in seconds, so a stat can be
 redefined without re-reading 50,000 hands of text.
+
+Session boundaries are computed once, when hands are imported, and stored on
+the hand: a gap of more than 30 minutes starts a new session. Deriving them
+inside a filtered query instead would let the definition of a session move
+depending on what was loaded, so "last session" would mean a different set of
+hands every time you refreshed. The period filter and the session list read the
+same stored column and therefore cannot disagree.
 
 `derive.py` is a Python replay rather than SQL because the denominators are
 *sequential*. "Faced exactly one raise with the option to act" is a claim about
@@ -215,6 +223,31 @@ The four-line winnings chart is the reason trackers exist. The rest supports it.
   High WWSF with low WTSD is fine, but check the red line supports it.
 - **Pot-size buckets** are the fastest read in the report. Losses concentrated
   in the top bucket mean the problem is stack-off decisions, not preflop ranges.
+- **The period selector** at the top filters the tables, the frequencies and
+  the compliance checks, and adds a comparison against everything before the
+  selected window. It answers "is the thing I am working on moving", which is
+  the only question available on a given day: `Donk Flop 32.2% selected, 38.5%
+  prior, -6.3`. It never defaults to anything but All.
+
+  Two things it deliberately does not do. It does not show a win rate while a
+  period is selected — over one session that number carries an interval of
+  roughly +/-150 bb/100, so displaying it would only invite you to read it — and
+  it does not show a delta where either side has fewer than 30 opportunities,
+  because the difference between two noisy rates is noisier than either. A
+  compliance check with too few opportunities reads **n too small** rather than
+  failing: 0 button opens out of 2 is silence, not a broken plan.
+
+  Compliance counts also carry a rate per 100 hands and a prior-period figure,
+  because a cumulative counter only goes up. Once "SB cold calls" reads 11 it
+  reads 11 forever, however well you play afterwards; "0 this session, 11
+  before" is the version that can improve.
+
+  The cumulative winnings chart, the rolling-discipline chart and the session
+  list always show the whole history, with the selected period shaded — a
+  single session on its own axis tells you nothing except where it sits. The
+  13x13 grid splits into selected and prior panels on a shared colour scale, so
+  range drift is visible directly.
+
 - **Biggest pots** is where every other section ends up. Each aggregate finding
   is really an instruction to go and look at some hands, and this is the list:
   the fifteen largest losses and fifteen largest wins by net big blinds, with

@@ -76,6 +76,12 @@ def _fmt_pct(v, ci=None) -> str:
     return s
 
 
+def _fmt_delta(new, old, unit: str, enough: bool) -> str:
+    if not enough or new is None or old is None:
+        return "        "
+    return f"{new - old:+7.1f}{unit}"
+
+
 def cmd_stats(args) -> int:
     conn = db.connect(args.db)
     hero = args.hero or db.detect_hero(conn)
@@ -88,13 +94,28 @@ def cmd_stats(args) -> int:
             print(f"{p['site_hand_no']}: {p['problem']}")
         return 0
 
-    m = stats.money_summary(conn, hero)
+    available = stats.periods(conn, hero)
+    period = next((x for x in available if x.key == args.period), None)
+    if period is None:
+        print(f"unknown period {args.period!r}; available: "
+              f"{', '.join(x.key for x in available)}", file=sys.stderr)
+        return 1
+    w = period.selected
+    prior = None if period.is_all else period.prior
+
+    m = stats.money_summary(conn, hero, w)
     if not m.get("hands"):
         print("no hands for hero", hero, file=sys.stderr)
         return 1
 
     print(f"\nHero: {hero}   {m['hands']} hands   {m['first_hand']} .. {m['last_hand']}")
+    if prior is not None:
+        print(f"Period: {period.label}   compared against the "
+              f"{prior.hands} hands before it")
     print("-" * 68)
+    # Win rate over a filtered window is noise with a decimal point on it, and
+    # the report suppresses it outright for that reason. Here it is kept but
+    # labelled, because a terminal reader asked for exactly this window.
     print(f"  Win rate        {m['bb100']:+8.2f} bb/100   +/- {m['ci95']:.1f} (95% CI)")
     if m["has_ev"]:
         print(f"  All-in adj. EV  {m['ev_bb100']:+8.2f} bb/100   "
@@ -105,18 +126,23 @@ def cmd_stats(args) -> int:
           f"(gross {m['gross_bb100']:+.2f})")
     print(f"  Std deviation   {m['sd_bb100']:8.1f} bb/100")
 
-    print("\nPreflop")
-    print("-" * 68)
-    for r in stats.preflop_stats(conn, hero):
-        ci = (r["ci_lo"], r["ci_hi"])
-        print(f"  {r['name']:<20} {_fmt_pct(r['pct'], ci)}   n={int(r['den'])}")
-
-    print("\nPostflop")
-    print("-" * 68)
-    for r in stats.postflop_stats(conn, hero):
-        ci = (r["ci_lo"], r["ci_hi"])
-        print(f"  {r['name']:<20} {_fmt_pct(r['pct'], ci)}   n={int(r['den'])}")
-    ag = stats.aggression(conn, hero)
+    for label, fn in (("Preflop", stats.preflop_stats),
+                      ("Postflop", stats.postflop_stats)):
+        print(f"\n{label}")
+        print("-" * 68)
+        old = {x["name"]: x for x in fn(conn, hero, prior)} if prior else {}
+        for r in fn(conn, hero, w):
+            ci = (r["ci_lo"], r["ci_hi"])
+            line = f"  {r['name']:<20} {_fmt_pct(r['pct'], ci)}   n={int(r['den'])}"
+            if prior:
+                o = old.get(r["name"], {"pct": None, "den": 0})
+                enough = (r["den"] >= stats.MIN_OPPS
+                          and o["den"] >= stats.MIN_OPPS)
+                prev = "     -" if o["pct"] is None else f"{o['pct']:5.1f}%"
+                line += (f"   prior {prev}"
+                         f"  {_fmt_delta(r['pct'], o['pct'], '', enough)}")
+            print(line)
+    ag = stats.aggression(conn, hero, w)
     if ag["afq"] is not None:
         print(f"  {'Aggression Freq':<20} {ag['afq']:5.1f}%")
         print(f"  {'Aggression Factor':<20} "
@@ -126,7 +152,7 @@ def cmd_stats(args) -> int:
     print("-" * 68)
     print(f"  {'POS':<5}{'HANDS':>7}{'VPIP':>8}{'PFR':>8}{'3BET':>8}{'BB/100':>10}"
           f"{'95% CI':>12}")
-    for r in stats.by_position(conn, hero):
+    for r in stats.by_position(conn, hero, w):
         print(f"  {r['position']:<5}{r['hands']:>7}"
               f"{(f'{r['vpip']:.1f}' if r['vpip'] is not None else '-'):>8}"
               f"{(f'{r['pfr']:.1f}' if r['pfr'] is not None else '-'):>8}"
@@ -135,11 +161,23 @@ def cmd_stats(args) -> int:
 
     print("\nCompliance")
     print("-" * 68)
-    for c in stats.compliance(conn, hero):
-        mark = "ok " if c["ok"] else ("!! " if c["ok"] is False else "   ")
-        val = (f"{c['value']:.1f}%" if c["unit"] == "pct" and c["value"] is not None
-               else str(c["value"]))
-        print(f"  {mark}{c['name']:<28} {val:>8}  target {c['target']:<6} {c['note']}")
+    marks = {"ok": "ok ", "off": "!! ", "watch": "   ", "thin": " ? "}
+    old = {c["name"]: c for c in stats.compliance(conn, hero, prior)} if prior else {}
+    for c in stats.compliance(conn, hero, w):
+        if c["kind"] == "count":
+            val = f"{int(c['num'])}"
+            rate = "" if c["per100"] is None else f" ({c['per100']:.2f}/100)"
+        else:
+            val = "-" if c["value"] is None else f"{c['value']:.1f}%"
+            rate = f" ({int(c['num'])}/{int(c['den'])})"
+        line = (f"  {marks[c['status']]}{c['name']:<28} {val:>7}{rate:<14}"
+                f"target {c['target']:<6}")
+        o = old.get(c["name"])
+        if o is not None:
+            was = (f"{int(o['num'])}" if c["kind"] == "count"
+                   else ("-" if o["value"] is None else f"{o['value']:.1f}%"))
+            line += f"prior {was:>7}  "
+        print(line + c["note"])
 
     print("\nSample size")
     print("-" * 68)
@@ -148,7 +186,7 @@ def cmd_stats(args) -> int:
         print(f"  {mark} {r['stat']:<30} {r['have']:>7} / {r['needed']:<7} "
               f"({r['pct']:.0f}%)")
 
-    pots = stats.big_pots(conn, hero, 10)
+    pots = stats.big_pots(conn, hero, 10, w)
     for label, key in (("Biggest losses", "losses"), ("Biggest wins", "wins")):
         rows = pots[key]
         if not rows:
@@ -161,8 +199,8 @@ def cmd_stats(args) -> int:
                   f"{r['board'] or '':<16}pot {r['pot_bb']:6.1f}  "
                   f"{r['net_bb']:+8.1f}bb  {r['exit_street']:<9}{r['outcome']}")
 
-    sess = stats.sessions(conn, hero)
-    print(f"\nSessions: {len(sess)}   timeouts: {stats.timeouts(conn, hero)}")
+    sess = stats.sessions(conn, hero, w)
+    print(f"\nSessions: {len(sess)}   timeouts: {stats.timeouts(conn, hero, w)}")
     for s in sess[-10:]:
         print(f"  {s['start'][:16]}  {s['duration_min']:5.0f}min  "
               f"{s['hands']:4d} hands  {s['n_tables']} table(s)  "
@@ -223,6 +261,9 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("stats", help="print stats to the terminal")
     s.add_argument("--problems", action="store_true", help="list parse problems")
+    s.add_argument("--period", default="all",
+                   help="restrict to a period: all, session, day, week, n500, "
+                        "n1000 (whichever the history supports)")
     s.set_defaults(func=cmd_stats)
 
     s = sub.add_parser("ev", help="compute all-in EV")
@@ -234,7 +275,11 @@ def main(argv=None) -> int:
     s.set_defaults(func=cmd_report)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except db.StaleSchema as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

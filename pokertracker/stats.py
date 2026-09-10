@@ -56,18 +56,172 @@ def _hero(conn: sqlite3.Connection, hero: str | None) -> str:
 
 
 # --------------------------------------------------------------------------
+# periods
+#
+# A period filter is one predicate applied at the top of the pipeline, not a
+# change to any individual stat: every aggregation below already keys off a set
+# of hands, so narrowing that set is all a filter has to do.
+
+# Below this many opportunities a rate is noise and a difference between two
+# rates is the difference between two pieces of noise. Rates are still shown --
+# with their (now very wide) interval -- but deltas against the prior period
+# are suppressed rather than invited to be read.
+MIN_OPPS = 30
+
+# Fixed hand counts offered by the selector. A free-text N cannot work in a
+# report that has to open from file:// with no server behind it.
+LAST_N_HANDS = (500, 1000)
+
+
+@dataclass(frozen=True)
+class Window:
+    """A slice of the history, as a SQL predicate over the `hands` alias `h`.
+
+    Windows are half-open on the recent side: everything at or after a boundary
+    hand, or everything strictly before it. Ordering is by (played_at, hand_id)
+    rather than played_at alone because multi-tabling puts several hands on the
+    same second, and a tie broken arbitrarily would let a hand fall into both
+    the selected window and the prior one.
+    """
+
+    label: str
+    sql: str
+    params: tuple
+    hands: int
+
+    @property
+    def empty(self) -> bool:
+        return self.hands == 0
+
+
+def _win(window: Window | None) -> tuple[str, tuple]:
+    return ("1=1", ()) if window is None else (window.sql, window.params)
+
+
+@dataclass(frozen=True)
+class Period:
+    """A selectable window plus everything that came before it."""
+
+    key: str
+    label: str
+    selected: Window
+    prior: Window
+
+    @property
+    def is_all(self) -> bool:
+        return self.key == "all"
+
+
+def _since(boundary) -> tuple[str, tuple]:
+    return ("(h.played_at, h.hand_id) >= (?, ?)", boundary)
+
+
+def _before(boundary) -> tuple[str, tuple]:
+    return ("(h.played_at, h.hand_id) < (?, ?)", boundary)
+
+
+def periods(conn: sqlite3.Connection, hero: str,
+            last_n: tuple[int, ...] = LAST_N_HANDS) -> list[Period]:
+    """The period options to offer, given what is actually in the database.
+
+    An option is dropped when it is empty, when it covers the whole history
+    (in which case it is just "All" under another name), and when it starts at
+    the same hand as an option already offered -- for a player with one evening
+    of hands, "last session", "last 24 hours" and "last 7 days" are the same
+    set, and offering three buttons that do the same thing is worse than one.
+    """
+    rows = conn.execute(
+        """SELECT h.hand_id, h.played_at, h.session_id
+           FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+           ORDER BY h.played_at, h.hand_id""",
+        (hero,),
+    ).fetchall()
+    total = len(rows)
+    all_window = Window("All hands", "1=1", (), total)
+    empty = Window("Nothing before", "0=1", (), 0)
+    out = [Period("all", "All", all_window, empty)]
+    if total < 2:
+        return out
+
+    from datetime import datetime, timedelta
+
+    last_t = datetime.fromisoformat(rows[-1]["played_at"])
+    last_session = rows[-1]["session_id"]
+
+    def index_from(pred) -> int | None:
+        """First index satisfying pred, scanning back from the end."""
+        i = total
+        while i > 0 and pred(rows[i - 1]):
+            i -= 1
+        return i if i < total else None
+
+    candidates = [
+        ("session", "Last session",
+         index_from(lambda r: r["session_id"] == last_session)),
+        ("day", "Last 24 hours",
+         index_from(lambda r: datetime.fromisoformat(r["played_at"])
+                    >= last_t - timedelta(days=1))),
+        ("week", "Last 7 days",
+         index_from(lambda r: datetime.fromisoformat(r["played_at"])
+                    >= last_t - timedelta(days=7))),
+    ]
+    for n in last_n:
+        candidates.append((f"n{n}", f"Last {n:,} hands",
+                           total - n if total > n else None))
+
+    seen = set()
+    for key, label, i in candidates:
+        if i is None or i <= 0 or i in seen:
+            continue
+        seen.add(i)
+        boundary = (rows[i]["played_at"], rows[i]["hand_id"])
+        sel_sql, sel_p = _since(boundary)
+        pri_sql, pri_p = _before(boundary)
+        out.append(Period(
+            key, label,
+            Window(label, sel_sql, sel_p, total - i),
+            Window("Everything before", pri_sql, pri_p, i),
+        ))
+    return out
+
+
+def hand_index_range(conn: sqlite3.Connection, hero: str,
+                     window: Window | None) -> tuple[int, int] | None:
+    """Where a window sits in the hero's chronological hand sequence.
+
+    The cumulative charts are drawn once over the whole history and the period
+    is shaded on top of them, so what they need is not the window's rows but
+    its position: a period seen in isolation loses the context that makes the
+    chart worth looking at.
+    """
+    sql, params = _win(window)
+    row = conn.execute(
+        f"""SELECT COUNT(*) n,
+                   SUM(CASE WHEN {sql} THEN 1 ELSE 0 END) sel,
+                   SUM(CASE WHEN {sql} THEN 0 ELSE 1 END) before
+            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?""",
+        (*params, *params, hero),
+    ).fetchone()
+    if not row["n"] or not row["sel"]:
+        return None
+    return (row["before"] + 1, row["n"])
+
+
+# --------------------------------------------------------------------------
 # money
 
 
-def bb_series(conn: sqlite3.Connection, hero: str) -> list[dict]:
+def bb_series(conn: sqlite3.Connection, hero: str,
+              window: Window | None = None) -> list[dict]:
     """Per-hand hero results in big blinds, in chronological order.
 
     Everything on the money side is built from this one query so the four lines
     on the winnings graph cannot drift apart.
     """
+    wsql, wp = _win(window)
     rows = conn.execute(
-        """
-        SELECT h.hand_id, h.played_at, h.table_name, h.bb,
+        f"""
+        SELECT h.hand_id, h.played_at, h.table_name, h.bb, h.session_id,
                r.net * 1.0 / h.bb              AS net_bb,
                r.rake_share * 1.0 / h.bb       AS rake_bb,
                r.reached_showdown              AS sd,
@@ -80,15 +234,17 @@ def bb_series(conn: sqlite3.Connection, hero: str) -> list[dict]:
         JOIN results r     ON r.hand_id = h.hand_id AND r.player = ?
         JOIN hand_player hp ON hp.hand_id = h.hand_id AND hp.player = ?
         LEFT JOIN allin_ev e ON e.hand_id = h.hand_id AND e.player = ?
+        WHERE {wsql}
         ORDER BY h.played_at, h.hand_id
         """,
-        (hero, hero, hero),
+        (hero, hero, hero, *wp),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def money_summary(conn: sqlite3.Connection, hero: str) -> dict:
-    rows = bb_series(conn, hero)
+def money_summary(conn: sqlite3.Connection, hero: str,
+                  window: Window | None = None) -> dict:
+    rows = bb_series(conn, hero, window)
     n = len(rows)
     if not n:
         return {"hands": 0}
@@ -160,34 +316,39 @@ POSTFLOP_DEFS = [
 ]
 
 
-def _rates(conn, hero, defs, where="", params=()) -> list[dict]:
+def _rates(conn, hero, defs, window: Window | None = None) -> list[dict]:
     select = ", ".join(
         f"SUM({num}) AS n_{i}, SUM({den}) AS d_{i}" for i, (_, num, den) in enumerate(defs)
     )
-    sql = f"SELECT COUNT(*) AS hands, {select} FROM hand_player WHERE player = ? {where}"
-    row = conn.execute(sql, (hero, *params)).fetchone()
+    wsql, wp = _win(window)
+    sql = (f"SELECT COUNT(*) AS hands, {select} FROM hand_player hp"
+           f" JOIN hands h ON h.hand_id = hp.hand_id"
+           f" WHERE hp.player = ? AND {wsql}")
+    row = conn.execute(sql, (hero, *wp)).fetchone()
     out = []
     for i, (name, _, _) in enumerate(defs):
         out.append(Rate(name, row[f"n_{i}"] or 0, row[f"d_{i}"] or 0).as_dict())
     return out
 
 
-def preflop_stats(conn, hero, where="", params=()) -> list[dict]:
-    return _rates(conn, hero, PREFLOP_DEFS, where, params)
+def preflop_stats(conn, hero, window: Window | None = None) -> list[dict]:
+    return _rates(conn, hero, PREFLOP_DEFS, window)
 
 
-def postflop_stats(conn, hero, where="", params=()) -> list[dict]:
-    return _rates(conn, hero, POSTFLOP_DEFS, where, params)
+def postflop_stats(conn, hero, window: Window | None = None) -> list[dict]:
+    return _rates(conn, hero, POSTFLOP_DEFS, window)
 
 
-def aggression(conn, hero) -> dict:
+def aggression(conn, hero, window: Window | None = None) -> dict:
+    wsql, wp = _win(window)
     row = conn.execute(
-        """SELECT
+        f"""SELECT
              SUM(aggr_flop+aggr_turn+aggr_river)     AS aggr,
              SUM(calls_flop+calls_turn+calls_river)  AS calls,
              SUM(folds_flop+folds_turn+folds_river)  AS folds
-           FROM hand_player WHERE player = ?""",
-        (hero,),
+           FROM hand_player hp JOIN hands h ON h.hand_id = hp.hand_id
+           WHERE hp.player = ? AND {wsql}""",
+        (hero, *wp),
     ).fetchone()
     aggr, calls, folds = row["aggr"] or 0, row["calls"] or 0, row["folds"] or 0
     denom = aggr + calls + folds
@@ -195,8 +356,9 @@ def aggression(conn, hero) -> dict:
     for street in ("flop", "turn", "river"):
         r = conn.execute(
             f"""SELECT SUM(aggr_{street}) a, SUM(calls_{street}) c, SUM(folds_{street}) f
-                FROM hand_player WHERE player = ?""",
-            (hero,),
+                FROM hand_player hp JOIN hands h ON h.hand_id = hp.hand_id
+                WHERE hp.player = ? AND {wsql}""",
+            (hero, *wp),
         ).fetchone()
         a, c, f = r["a"] or 0, r["c"] or 0, r["f"] or 0
         per_street[street] = {
@@ -211,14 +373,15 @@ def aggression(conn, hero) -> dict:
     }
 
 
-def by_position(conn, hero) -> list[dict]:
+def by_position(conn, hero, window: Window | None = None) -> list[dict]:
     """VPIP / PFR / 3-Bet / bb/100 broken out by position.
 
     The aggregate numbers hide almost everything interesting; this table is
     where leaks are actually visible.
     """
+    wsql, wp = _win(window)
     rows = conn.execute(
-        """
+        f"""
         SELECT hp.position,
                COUNT(*)                              AS hands,
                SUM(hp.vpip)                          AS vpip,
@@ -229,10 +392,10 @@ def by_position(conn, hero) -> list[dict]:
         FROM hand_player hp
         JOIN hands h   ON h.hand_id = hp.hand_id
         JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
-        WHERE hp.player = ? AND hp.position <> ''
+        WHERE hp.player = ? AND hp.position <> '' AND {wsql}
         GROUP BY hp.position
         """,
-        (hero,),
+        (hero, *wp),
     ).fetchall()
 
     out = []
@@ -240,11 +403,11 @@ def by_position(conn, hero) -> list[dict]:
         n = r["hands"]
         net = r["net_bb"] or 0.0
         per_hand = conn.execute(
-            """SELECT r.net * 1.0 / h.bb AS x FROM hand_player hp
+            f"""SELECT r.net * 1.0 / h.bb AS x FROM hand_player hp
                JOIN hands h ON h.hand_id = hp.hand_id
                JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
-               WHERE hp.player = ? AND hp.position = ?""",
-            (hero, r["position"]),
+               WHERE hp.player = ? AND hp.position = ? AND {wsql}""",
+            (hero, r["position"], *wp),
         ).fetchall()
         xs = [p["x"] for p in per_hand]
         mean = sum(xs) / n if n else 0
@@ -268,55 +431,95 @@ def by_position(conn, hero) -> list[dict]:
 # compliance and behaviour
 
 
-def compliance(conn, hero) -> list[dict]:
-    """Did you execute the plan? A different question from whether it is good."""
+def compliance(conn, hero, window: Window | None = None) -> list[dict]:
+    """Did you execute the plan? A different question from whether it is good.
+
+    Every check reports a numerator and a denominator, never a bare tally. A
+    cumulative counter only goes up: once it says 11 it will say 11 forever no
+    matter how the last thousand hands were played, so it stops carrying
+    information about the thing the reader is actually trying to change. The
+    denominator is what makes "5 in this session" comparable with "6 before".
+
+    `status` is deliberately four-valued. "thin" is not a soft failure -- it
+    says the window does not contain enough opportunities for the check to have
+    an opinion, which is the honest answer for 0 opens out of 2 and is not the
+    same statement as "off plan".
+    """
+    wsql, wp = _win(window)
     row = conn.execute(
-        """SELECT COUNT(*) hands,
-                  SUM(sb_coldcall) sb_cc,
-                  SUM(sb_complete) sb_comp,
-                  SUM(btn_open) btn_open,
-                  SUM(btn_open_opp) btn_open_opp,
-                  SUM(CASE WHEN eff_stack_bb < 80 THEN 1 ELSE 0 END) short,
-                  AVG(eff_stack_bb) avg_eff
-           FROM hand_player WHERE player = ?""",
-        (hero,),
+        f"""SELECT COUNT(*) hands,
+                  SUM(hp.sb_coldcall) sb_cc,
+                  SUM(hp.sb_complete) sb_comp,
+                  SUM(hp.btn_open) btn_open,
+                  SUM(hp.btn_open_opp) btn_open_opp,
+                  SUM(CASE WHEN hp.eff_stack_bb < 80 THEN 1 ELSE 0 END) short,
+                  AVG(hp.eff_stack_bb) avg_eff
+           FROM hand_player hp JOIN hands h ON h.hand_id = hp.hand_id
+           WHERE hp.player = ? AND {wsql}""",
+        (hero, *wp),
     ).fetchone()
     n = row["hands"] or 0
-    checks = [
-        {"name": "SB cold calls", "value": row["sb_cc"] or 0, "target": "0",
-         "unit": "count", "ok": (row["sb_cc"] or 0) == 0,
-         "note": "Any non-zero value is a deviation from a raise-or-fold SB."},
-        {"name": "SB completes (limp)", "value": row["sb_comp"] or 0, "target": "0",
-         "unit": "count", "ok": (row["sb_comp"] or 0) == 0,
-         "note": "Completing the small blind is VPIP but not PFR."},
-        {"name": "BTN open when folded to", "value":
-            100 * row["btn_open"] / row["btn_open_opp"] if row["btn_open_opp"] else None,
-         "target": "~45%", "unit": "pct",
-         "ok": None if not row["btn_open_opp"] else
-               38 <= 100 * row["btn_open"] / row["btn_open_opp"] <= 52,
-         "note": f"{row['btn_open'] or 0}/{row['btn_open_opp'] or 0} opportunities."},
-        {"name": "Hands below 80bb effective", "value":
-            100 * row["short"] / n if n else None,
-         "target": "low", "unit": "pct", "ok": None,
-         "note": f"Mean effective stack {row['avg_eff']:.1f}bb."
-                 if row["avg_eff"] is not None else ""},
+
+    def count_check(name, num, target, note):
+        # A count check has an opinion at any n: one small-blind cold call is
+        # one deviation whether it happened in 80 hands or 8,000. What n
+        # changes is only how much a zero is worth, which the rate per 100
+        # carries instead of a pill.
+        num = num or 0
+        return {"name": name, "kind": "count", "num": num, "den": n,
+                "value": float(num),
+                "per100": 100.0 * num / n if n else None,
+                "target": target,
+                "status": "thin" if not n else ("ok" if num == 0 else "off"),
+                "note": note}
+
+    def rate_check(name, num, den, target, lo, hi, note):
+        num, den = num or 0, den or 0
+        pct = 100.0 * num / den if den else None
+        if den < MIN_OPPS:
+            status = "thin"
+        elif lo is None:
+            status = "watch"
+        else:
+            status = "ok" if lo <= pct <= hi else "off"
+        return {"name": name, "kind": "rate", "num": num, "den": den,
+                "value": pct, "per100": None, "target": target,
+                "status": status, "note": note}
+
+    return [
+        count_check("SB cold calls", row["sb_cc"], "0",
+                    "Any non-zero value is a deviation from a raise-or-fold SB."),
+        count_check("SB completes (limp)", row["sb_comp"], "0",
+                    "Completing the small blind is VPIP but not PFR."),
+        rate_check("BTN open when folded to", row["btn_open"], row["btn_open_opp"],
+                   "~45%", 38, 52, "Opens divided by opportunities on the button."),
+        rate_check("Hands below 80bb effective", row["short"], n, "low", None, None,
+                   f"Mean effective stack {row['avg_eff']:.1f}bb."
+                   if row["avg_eff"] is not None else ""),
     ]
-    return checks
 
 
-def sessions(conn, hero, gap_minutes: int = 30) -> list[dict]:
-    """Split hero's hands into sessions on a gap larger than gap_minutes."""
-    rows = bb_series(conn, hero)
+def sessions(conn, hero, window: Window | None = None) -> list[dict]:
+    """Hero's hands grouped into the sessions assigned at ingest.
+
+    The boundaries are read from `hands.session_id` rather than recomputed from
+    a gap threshold here. Recomputing would give the same answer today and a
+    different one the moment a filter changed what this function could see,
+    which is exactly the drift the stored column exists to prevent -- and it
+    would let this table disagree with the "last session" period filter.
+    """
+    rows = bb_series(conn, hero, window)
     if not rows:
         return []
     from datetime import datetime
 
-    out, cur = [], None
-    prev_t = None
+    out, cur, sid = [], None, None
     for r in rows:
         t = datetime.fromisoformat(r["played_at"])
-        if cur is None or (t - prev_t).total_seconds() > gap_minutes * 60:
-            cur = {"start": t, "end": t, "hands": 0, "net_bb": 0.0, "tables": set(),
+        if cur is None or r["session_id"] != sid:
+            sid = r["session_id"]
+            cur = {"session_id": sid, "start": t, "end": t, "hands": 0,
+                   "net_bb": 0.0, "tables": set(),
                    "buckets": {0: [0, 0.0], 1: [0, 0.0], 2: [0, 0.0]}}
             out.append(cur)
         cur["end"] = t
@@ -327,43 +530,44 @@ def sessions(conn, hero, gap_minutes: int = 30) -> list[dict]:
         b = 0 if elapsed < 30 else (1 if elapsed < 60 else 2)
         cur["buckets"][b][0] += 1
         cur["buckets"][b][1] += r["net_bb"]
-        prev_t = t
 
-    for s in out:
-        dur = (s["end"] - s["start"]).total_seconds() / 60
-        s["duration_min"] = dur
-        s["bb100"] = 100 * s["net_bb"] / s["hands"] if s["hands"] else 0
-        s["n_tables"] = len(s["tables"])
-        s["tables"] = sorted(s["tables"])
-        s["start"] = s["start"].isoformat(" ")
-        s["end"] = s["end"].isoformat(" ")
+    for sess in out:
+        dur = (sess["end"] - sess["start"]).total_seconds() / 60
+        sess["duration_min"] = dur
+        sess["bb100"] = 100 * sess["net_bb"] / sess["hands"] if sess["hands"] else 0
+        sess["n_tables"] = len(sess["tables"])
+        sess["tables"] = sorted(sess["tables"])
+        sess["start"] = sess["start"].isoformat(" ")
+        sess["end"] = sess["end"].isoformat(" ")
     return out
 
 
-def concurrency(conn, hero) -> list[dict]:
+def concurrency(conn, hero, window: Window | None = None) -> list[dict]:
     """Table count active in each 5-minute window, joined to result in that window.
 
     Derived from overlapping timestamps across table_name rather than from any
     client-side signal, so it reflects what was actually being played.
     """
+    wsql, wp = _win(window)
     rows = conn.execute(
-        """
+        f"""
         SELECT strftime('%Y-%m-%d %H:', h.played_at) ||
                printf('%02d', (CAST(strftime('%M', h.played_at) AS INTEGER) / 5) * 5) AS bucket,
                COUNT(DISTINCT h.table_name) AS tables,
                COUNT(*) AS hands,
                SUM(r.net * 1.0 / h.bb) AS net_bb
         FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+        WHERE {wsql}
         GROUP BY bucket ORDER BY bucket
         """,
-        (hero,),
+        (hero, *wp),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def by_table_count(conn, hero) -> list[dict]:
+def by_table_count(conn, hero, window: Window | None = None) -> list[dict]:
     agg: dict[int, list] = {}
-    for w in concurrency(conn, hero):
+    for w in concurrency(conn, hero, window):
         a = agg.setdefault(w["tables"], [0, 0.0])
         a[0] += w["hands"]
         a[1] += w["net_bb"] or 0.0
@@ -371,48 +575,61 @@ def by_table_count(conn, hero) -> list[dict]:
             for k, v in sorted(agg.items())]
 
 
-def timeouts(conn, hero) -> int:
-    row = conn.execute("SELECT COUNT(*) n FROM timeouts WHERE player = ?", (hero,)).fetchone()
+def timeouts(conn, hero, window: Window | None = None) -> int:
+    wsql, wp = _win(window)
+    row = conn.execute(
+        f"""SELECT COUNT(*) n FROM timeouts t
+            JOIN hands h ON h.hand_id = t.hand_id
+            WHERE t.player = ? AND {wsql}""",
+        (hero, *wp),
+    ).fetchone()
     return row["n"]
 
 
-def by_time(conn, hero, fmt: str) -> list[dict]:
+def by_time(conn, hero, fmt: str, window: Window | None = None) -> list[dict]:
+    wsql, wp = _win(window)
     rows = conn.execute(
         f"""SELECT strftime('{fmt}', h.played_at) AS k, COUNT(*) hands,
                    SUM(r.net * 1.0 / h.bb) net_bb
             FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+            WHERE {wsql}
             GROUP BY k ORDER BY k""",
-        (hero,),
+        (hero, *wp),
     ).fetchall()
     return [{"key": r["k"], "hands": r["hands"],
              "bb100": 100 * (r["net_bb"] or 0) / r["hands"] if r["hands"] else None}
             for r in rows]
 
 
-def stack_histogram(conn, hero, width: int = 10) -> list[dict]:
+def stack_histogram(conn, hero, width: int = 10,
+                    window: Window | None = None) -> list[dict]:
+    wsql, wp = _win(window)
     rows = conn.execute(
-        """SELECT CAST(eff_stack_bb / ? AS INTEGER) * ? AS bucket, COUNT(*) n
-           FROM hand_player WHERE player = ? GROUP BY bucket ORDER BY bucket""",
-        (width, width, hero),
+        f"""SELECT CAST(hp.eff_stack_bb / ? AS INTEGER) * ? AS bucket, COUNT(*) n
+           FROM hand_player hp JOIN hands h ON h.hand_id = hp.hand_id
+           WHERE hp.player = ? AND {wsql} GROUP BY bucket ORDER BY bucket""",
+        (width, width, hero, *wp),
     ).fetchall()
     return [{"bucket": r["bucket"], "n": r["n"]} for r in rows]
 
 
-def pot_buckets(conn, hero) -> list[dict]:
+def pot_buckets(conn, hero, window: Window | None = None) -> list[dict]:
     """Net winnings grouped by final pot size in bb.
 
     Most micro-stakes losing players are fine in small pots and hemorrhage in
     big ones. Losses concentrated in the top bucket mean the problem is
     stack-off decisions, not preflop ranges.
     """
+    wsql, wp = _win(window)
     edges = [(0, 5), (5, 15), (15, 40), (40, 100), (100, 10**9)]
     out = []
     for lo, hi in edges:
         r = conn.execute(
-            """SELECT COUNT(*) n, SUM(r.net * 1.0 / h.bb) net
+            f"""SELECT COUNT(*) n, SUM(r.net * 1.0 / h.bb) net
                FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
-               WHERE h.total_pot * 1.0 / h.bb >= ? AND h.total_pot * 1.0 / h.bb < ?""",
-            (hero, lo, hi),
+               WHERE h.total_pot * 1.0 / h.bb >= ? AND h.total_pot * 1.0 / h.bb < ?
+                 AND {wsql}""",
+            (hero, lo, hi, *wp),
         ).fetchone()
         label = f"{lo}-{hi}bb" if hi < 10**9 else f"{lo}+bb"
         out.append({"label": label, "hands": r["n"], "net_bb": r["net"] or 0.0,
@@ -420,11 +637,14 @@ def pot_buckets(conn, hero) -> list[dict]:
     return out
 
 
-def street_funnel(conn, hero) -> list[dict]:
+def street_funnel(conn, hero, window: Window | None = None) -> list[dict]:
+    wsql, wp = _win(window)
     row = conn.execute(
-        """SELECT COUNT(*) dealt, SUM(saw_flop) f, SUM(saw_turn) t, SUM(saw_river) rv,
-                  SUM(wtsd) sd FROM hand_player WHERE player = ?""",
-        (hero,),
+        f"""SELECT COUNT(*) dealt, SUM(hp.saw_flop) f, SUM(hp.saw_turn) t,
+                   SUM(hp.saw_river) rv, SUM(hp.wtsd) sd
+            FROM hand_player hp JOIN hands h ON h.hand_id = hp.hand_id
+            WHERE hp.player = ? AND {wsql}""",
+        (hero, *wp),
     ).fetchone()
     money = {}
     for label, cond in [("dealt", "1=1"), ("flop", "hp.saw_flop=1"),
@@ -434,8 +654,8 @@ def street_funnel(conn, hero) -> list[dict]:
             f"""SELECT SUM(r.net * 1.0 / h.bb) net FROM hand_player hp
                 JOIN hands h ON h.hand_id = hp.hand_id
                 JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
-                WHERE hp.player = ? AND {cond}""",
-            (hero,),
+                WHERE hp.player = ? AND {cond} AND {wsql}""",
+            (hero, *wp),
         ).fetchone()
         money[label] = m["net"] or 0.0
     return [
@@ -447,17 +667,19 @@ def street_funnel(conn, hero) -> list[dict]:
     ]
 
 
-def range_grid(conn, hero, position: str | None = None) -> dict:
+def range_grid(conn, hero, position: str | None = None,
+               window: Window | None = None) -> dict:
     """13x13 grid: how often each combo was voluntarily played, and its bb/100."""
+    wsql, wp = _win(window)
     where = "AND hp.position = ?" if position else ""
-    params = [hero] + ([position] if position else [])
+    params = [hero] + ([position] if position else []) + list(wp)
     rows = conn.execute(
         f"""SELECT hp.hole_combo AS combo, COUNT(*) n, SUM(hp.vpip) vpip,
                    SUM(r.net * 1.0 / h.bb) net
             FROM hand_player hp
             JOIN hands h ON h.hand_id = hp.hand_id
             JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
-            WHERE hp.player = ? AND hp.hole_combo <> '' {where}
+            WHERE hp.player = ? AND hp.hole_combo <> '' {where} AND {wsql}
             GROUP BY hp.hole_combo""",
         params,
     ).fetchall()
@@ -561,7 +783,8 @@ def _outcome(row) -> str:
     return "no showdown"
 
 
-def big_pots(conn: sqlite3.Connection, hero: str, limit: int = 15) -> dict:
+def big_pots(conn: sqlite3.Connection, hero: str, limit: int = 15,
+             window: Window | None = None) -> dict:
     """The biggest winning and losing hands, with everything needed to review them.
 
     Every aggregate in this report ends in "go look at those hands"; this is the
@@ -585,13 +808,15 @@ def big_pots(conn: sqlite3.Connection, hero: str, limit: int = 15) -> dict:
         JOIN results r      ON r.hand_id = h.hand_id AND r.player = ?
         JOIN hand_player hp ON hp.hand_id = h.hand_id AND hp.player = ?
         LEFT JOIN seats s   ON s.hand_id = h.hand_id AND s.player = ?
+        WHERE {where}
         ORDER BY net_bb {dir}, h.hand_id
         LIMIT ?
     """
+    wsql, wp = _win(window)
     out = {}
     for key, direction in (("losses", "ASC"), ("wins", "DESC")):
-        rows = conn.execute(sql.format(dir=direction),
-                            (hero, hero, hero, limit)).fetchall()
+        rows = conn.execute(sql.format(dir=direction, where=wsql),
+                            (hero, hero, hero, *wp, limit)).fetchall()
         out[key] = [_drilldown_row(conn, r, hero) for r in rows
                     if (r["net_bb"] < 0 if key == "losses" else r["net_bb"] > 0)]
     return out

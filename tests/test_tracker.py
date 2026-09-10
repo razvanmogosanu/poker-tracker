@@ -406,6 +406,276 @@ class TestBigPots(unittest.TestCase):
         self.conn.rollback()
 
 
+class TestSessionBoundaries(unittest.TestCase):
+    """Sessions are assigned once at ingest, and must not move afterwards."""
+
+    @staticmethod
+    def build(offsets):
+        """A database whose only content is hands at the given minute offsets."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        for i, minute in enumerate(offsets):
+            conn.execute(
+                "INSERT INTO hands (site_hand_no, played_at, n_dealt, sb, bb)"
+                " VALUES (?,?,?,?,?)",
+                (f"h{i}", f"2026-09-01 {10 + minute // 60:02d}:{minute % 60:02d}:00",
+                 6, 1, 2),
+            )
+        return conn
+
+    def sessions_of(self, conn):
+        return [r["session_id"] for r in conn.execute(
+            "SELECT session_id FROM hands ORDER BY played_at, hand_id")]
+
+    def test_a_gap_of_exactly_the_threshold_does_not_split(self):
+        # The rule is "longer than", so 30 minutes of nothing is still one
+        # session; a player who steps away for exactly the threshold has not
+        # started a second session by doing so.
+        conn = self.build([0, 30, 60])
+        db.assign_sessions(conn, gap_minutes=30)
+        self.assertEqual(self.sessions_of(conn), [1, 1, 1])
+
+    def test_a_longer_gap_splits(self):
+        conn = self.build([0, 31, 32])
+        db.assign_sessions(conn, gap_minutes=30)
+        self.assertEqual(self.sessions_of(conn), [1, 2, 2])
+
+    def test_numbering_is_contiguous_from_one(self):
+        conn = self.build([0, 1, 100, 101, 300])
+        n = db.assign_sessions(conn, gap_minutes=30)
+        self.assertEqual(self.sessions_of(conn), [1, 1, 2, 2, 3])
+        self.assertEqual(n, 3)
+
+    def test_reassigning_is_idempotent(self):
+        conn = self.build([0, 1, 100, 300])
+        db.assign_sessions(conn, gap_minutes=30)
+        first = self.sessions_of(conn)
+        db.assign_sessions(conn, gap_minutes=30)
+        self.assertEqual(self.sessions_of(conn), first)
+
+    def test_a_later_hand_does_not_renumber_earlier_sessions(self):
+        """The whole reason the column is stored rather than derived per query.
+
+        Appending tonight's hands must leave last week's session ids alone, or
+        "last session" would mean a different set of hands after every import.
+        """
+        conn = self.build([0, 1, 100])
+        db.assign_sessions(conn, gap_minutes=30)
+        before = self.sessions_of(conn)
+        conn.execute(
+            "INSERT INTO hands (site_hand_no, played_at, n_dealt, sb, bb)"
+            " VALUES ('late', '2026-09-01 20:00:00', 6, 1, 2)")
+        db.assign_sessions(conn, gap_minutes=30)
+        self.assertEqual(self.sessions_of(conn)[:len(before)], before)
+
+    def test_an_empty_database_has_no_sessions(self):
+        self.assertEqual(db.assign_sessions(self.build([])), 0)
+
+
+class TestStaleSchema(unittest.TestCase):
+    """CREATE TABLE IF NOT EXISTS will not add a column to an existing file."""
+
+    def test_a_fresh_database_is_not_stale(self):
+        conn = db.connect(":memory:")
+        self.assertIn("session_id",
+                      {r["name"] for r in conn.execute("PRAGMA table_info(hands)")})
+
+    def test_a_database_missing_a_column_is_rejected_by_name(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        # The schema as it stood before session_id existed.
+        conn.execute("CREATE TABLE hands (hand_id INTEGER PRIMARY KEY,"
+                     " site_hand_no TEXT, played_at TEXT)")
+        with self.assertRaises(db.StaleSchema) as ctx:
+            db._check_schema(conn)
+        self.assertIn("session_id", str(ctx.exception))
+
+
+class TestPeriodFilters(unittest.TestCase):
+    """A period is one predicate at the top of the pipeline, nothing more.
+
+    So the test for it is a partition test: whatever a stat counts over the
+    selected window plus whatever it counts over the prior window has to equal
+    what it counts over everything, for every period on offer. If that holds,
+    no individual stat needed changing.
+    """
+
+    HERO = "Btn"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = sqlite3.connect(":memory:")
+        cls.conn.row_factory = sqlite3.Row
+        cls.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(cls.conn, hand, str(path))
+        # Spread the fixtures over three sessions on two days, so that every
+        # period option has something different to select.
+        rows = cls.conn.execute(
+            "SELECT hand_id FROM hands ORDER BY played_at, hand_id").fetchall()
+        stamps = ["2026-09-01 10:00:00", "2026-09-01 10:01:00", "2026-09-01 10:02:00",
+                  "2026-09-01 18:00:00", "2026-09-01 18:01:00",
+                  "2026-09-03 20:00:00", "2026-09-03 20:01:00", "2026-09-03 20:02:00",
+                  "2026-09-03 21:30:00", "2026-09-03 21:31:00"]
+        for r, stamp in zip(rows, stamps):
+            cls.conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
+                             (stamp, r["hand_id"]))
+        db.assign_sessions(cls.conn)
+        derive.rebuild(cls.conn)
+        cls.periods = stats.periods(cls.conn, cls.HERO, last_n=(2,))
+
+    def test_more_than_one_period_is_on_offer(self):
+        keys = [p.key for p in self.periods]
+        self.assertEqual(keys[0], "all")
+        self.assertGreater(len(keys), 1, keys)
+
+    def test_selected_and_prior_partition_the_hand_count(self):
+        total = self.periods[0].selected.hands
+        for p in self.periods:
+            self.assertEqual(p.selected.hands + p.prior.hands, total, p.key)
+
+    def test_no_period_is_empty_or_the_whole_history(self):
+        for p in self.periods[1:]:
+            self.assertGreater(p.selected.hands, 0, p.key)
+            self.assertGreater(p.prior.hands, 0, p.key)
+
+    def test_periods_are_offered_only_once_per_boundary(self):
+        starts = [p.selected.hands for p in self.periods[1:]]
+        self.assertEqual(len(starts), len(set(starts)), starts)
+
+    def test_every_rate_partitions_across_the_boundary(self):
+        whole = {r["name"]: r for r in stats.preflop_stats(self.conn, self.HERO)}
+        whole.update({r["name"]: r
+                      for r in stats.postflop_stats(self.conn, self.HERO)})
+        for p in self.periods[1:]:
+            parts = {}
+            for window in (p.selected, p.prior):
+                for r in (stats.preflop_stats(self.conn, self.HERO, window)
+                          + stats.postflop_stats(self.conn, self.HERO, window)):
+                    n, d = parts.get(r["name"], (0, 0))
+                    parts[r["name"]] = (n + r["num"], d + r["den"])
+            for name, (num, den) in parts.items():
+                self.assertEqual((num, den), (whole[name]["num"], whole[name]["den"]),
+                                 f"{p.key}: {name}")
+
+    def test_compliance_counts_partition_across_the_boundary(self):
+        whole = {c["name"]: c for c in stats.compliance(self.conn, self.HERO)}
+        for p in self.periods[1:]:
+            sel = {c["name"]: c for c in
+                   stats.compliance(self.conn, self.HERO, p.selected)}
+            pri = {c["name"]: c for c in
+                   stats.compliance(self.conn, self.HERO, p.prior)}
+            for name, c in whole.items():
+                self.assertEqual(sel[name]["num"] + pri[name]["num"], c["num"], name)
+                self.assertEqual(sel[name]["den"] + pri[name]["den"], c["den"], name)
+
+    def test_money_partitions_across_the_boundary(self):
+        whole = stats.money_summary(self.conn, self.HERO)
+        for p in self.periods[1:]:
+            a = stats.money_summary(self.conn, self.HERO, p.selected)
+            b = stats.money_summary(self.conn, self.HERO, p.prior)
+            self.assertEqual(a["hands"] + b["hands"], whole["hands"], p.key)
+            self.assertAlmostEqual(a["net_bb"] + b["net_bb"], whole["net_bb"],
+                                   places=6, msg=p.key)
+
+    def test_last_session_matches_the_last_session_in_the_list(self):
+        period = next((p for p in self.periods if p.key == "session"), None)
+        self.assertIsNotNone(period, "the fixtures should produce a last session")
+        listed = stats.sessions(self.conn, self.HERO)
+        self.assertEqual(period.selected.hands, listed[-1]["hands"])
+
+    def test_the_band_is_the_tail_of_the_hand_sequence(self):
+        total = self.periods[0].selected.hands
+        for p in self.periods[1:]:
+            lo, hi = stats.hand_index_range(self.conn, self.HERO, p.selected)
+            self.assertEqual(hi, total, p.key)
+            self.assertEqual(hi - lo + 1, p.selected.hands, p.key)
+
+    def test_a_thin_denominator_is_not_reported_as_a_failure(self):
+        """0 opens out of 2 opportunities is silence, not a broken plan."""
+        checks = {c["name"]: c
+                  for c in stats.compliance(self.conn, self.HERO, self.periods[-1].selected)}
+        btn = checks["BTN open when folded to"]
+        self.assertLess(btn["den"], stats.MIN_OPPS)
+        self.assertEqual(btn["status"], "thin")
+
+    def test_counts_carry_a_rate_per_hundred_hands(self):
+        for c in stats.compliance(self.conn, self.HERO):
+            if c["kind"] == "count" and c["den"]:
+                self.assertAlmostEqual(c["per100"], 100.0 * c["num"] / c["den"])
+
+
+class TestReportPeriods(unittest.TestCase):
+    """The dashboard has to carry every period with it: it opens from file://."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = TestPeriodFilters.conn
+        # Not TestPeriodFilters' hero: that one folds the button for nothing in
+        # every fixture, so it has no biggest pots and the drill-down would be
+        # empty for reasons that have nothing to do with periods.
+        cls.hero = "Small"
+        from pokertracker import report
+
+        cls.html = report.build(cls.conn, cls.hero)
+        import json as _json
+        import re as _re
+
+        m = _re.search(
+            r'<script type="application/json" id="period-data">(.*?)</script>',
+            cls.html, _re.S)
+        assert m, "the report must inline its period payload"
+        cls.payload = _json.loads(m.group(1).replace("\\u003c", "<"))
+
+    def test_every_period_carries_a_full_set_of_regions(self):
+        keys = {p["key"] for p in self.payload["periods"]}
+        self.assertIn("all", keys)
+        shapes = {k: sorted(v) for k, v in self.payload["regions"].items()}
+        self.assertEqual(set(shapes), keys)
+        self.assertEqual(len(set(map(tuple, shapes.values()))), 1,
+                         "every period must supply the same regions")
+
+    def test_the_default_view_is_all(self):
+        self.assertIn('data-period="all" aria-pressed="true"', self.html)
+        self.assertNotIn('aria-pressed="true" data-period', self.html)
+        for p in self.payload["periods"]:
+            if p["key"] != "all":
+                self.assertIn(f'data-period="{p["key"]}" aria-pressed="false"',
+                              self.html)
+
+    def test_win_rate_is_suppressed_once_a_period_is_selected(self):
+        self.assertIn("Win rate", self.payload["regions"]["all"]["r-tiles"])
+        for key, regions in self.payload["regions"].items():
+            if key == "all":
+                continue
+            self.assertNotIn("Win rate", regions["r-tiles"], key)
+            self.assertIn("Win rate is not shown", regions["r-banner"], key)
+
+    def test_filtered_tables_carry_a_prior_column(self):
+        for key, regions in self.payload["regions"].items():
+            want = key != "all"
+            self.assertEqual("<th>Prior</th>" in regions["r-preflop"], want, key)
+            self.assertEqual("<th>Prior</th>" in regions["r-compliance"], want, key)
+
+    def test_the_payload_cannot_close_its_own_script_element(self):
+        body = self.html.split('id="period-data">', 1)[1].split("</script>", 1)[0]
+        self.assertNotIn("<", body)
+
+    def test_hand_text_is_pooled_rather_than_repeated_per_period(self):
+        # Every drill-down row across every period must resolve against one
+        # shared pool, and the pool must not hold a hand nobody links to.
+        import re as _re
+
+        linked = set()
+        for regions in self.payload["regions"].values():
+            linked.update(_re.findall(r'data-hand="(\d+)"',
+                                      regions["r-drilldown"]))
+        self.assertTrue(linked)
+        self.assertTrue(set(self.payload["raws"]).issubset(linked))
+
+
 class TestLiveHistory(unittest.TestCase):
     """If the real folder is present, it must parse without a single problem."""
 

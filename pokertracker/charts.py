@@ -167,6 +167,12 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
 
     out = [f.grid(yticks, xticks, xfmt=lambda v: fmt(v, 0),
                   ylabel="Cumulative bb", xlabel="Hands played")]
+    # The period filter shades this band instead of redrawing the chart over a
+    # shorter axis. A single session plotted on its own is unreadable noise;
+    # the reason to look at this chart at all is where the selected hands sit
+    # relative to everything that came before them.
+    out.append(f'<rect class="period-band" x="{f.left}" y="{f.top}" width="0" '
+               f'height="{f.bottom - f.top:.1f}"/>')
     for name, vals, key, dash in series:
         pts = " ".join(f"{f.sx(i + 1):.1f},{f.sy(v):.1f}" for i, v in enumerate(vals))
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
@@ -179,6 +185,9 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
 
     payload = json.dumps({
         "left": f.left, "right": f.right, "top": f.top, "bottom": f.bottom,
+        # The x axis is padded out to a round tick past the last hand, so the
+        # period band needs the domain to place itself, not just the pixels.
+        "n": n, "x0": f.x0, "x1": f.x1,
         "series": [{"name": nm, "key": k, "values": [round(v, 2) for v in vals]}
                    for nm, vals, k, _ in series],
     })
@@ -242,14 +251,8 @@ def position_bars(rows) -> str:
 # 3. range heatmap
 
 
-def range_heatmap(grids: dict) -> str:
-    """13x13 grids, one per position filter, recoloured client-side."""
-    cell = 36
-    size = cell * 13
-    pad = 10
-    w = size + pad * 2
-    h = size + pad * 2
-
+def _grid_cells(side: str) -> str:
+    cell, pad = 36, 10
     cells = []
     for row in range(13):
         for col in range(13):
@@ -258,20 +261,42 @@ def range_heatmap(grids: dict) -> str:
             y = pad + row * cell
             shape = "pair" if row == col else ("suited" if row < col else "offsuit")
             cells.append(
-                f'<g class="cellg" data-combo="{combo}">'
+                f'<g class="cellg" data-combo="{combo}" data-side="{side}">'
                 f'<rect class="cell {shape}" x="{x}" y="{y}" width="{cell - 2}" '
                 f'height="{cell - 2}" rx="3"/>'
                 f'<text class="cell-label" x="{x + (cell - 2) / 2:.1f}" '
                 f'y="{y + (cell - 2) / 2 + 4:.1f}" text-anchor="middle">{combo}</text>'
                 f'</g>'
             )
+    size = cell * 13 + pad * 2
+    return svg("".join(cells), w=size, h=size, cls="chart grid13")
 
+
+def range_heatmap(period_grids: dict, positions) -> str:
+    """13x13 grids, recoloured client-side, as one panel or two.
+
+    Two panels rather than one when a period is selected: the question a period
+    filter is asked is "did the range drift", and drift is invisible in a single
+    grid no matter how carefully it is coloured. Both panels are painted from
+    one shared scale, because two grids on independent scales would show a
+    difference in colour that is not a difference in the data.
+
+    Cells arrive as compact `[n, vpip, bb100]` triples rather than named
+    objects. Every period carries a grid per position for both panels, and the
+    field names cost more bytes than the numbers do.
+    """
     options = "".join(
         f'<button type="button" class="chip" data-pos="{esc(k)}">{esc(k)}</button>'
-        for k in grids
+        for k in positions
+    )
+    panels = (
+        '<div class="panel" data-side="sel">'
+        '<div class="panel-head">Selected</div>' + _grid_cells("sel") + '</div>'
+        '<div class="panel" data-side="pri" hidden>'
+        '<div class="panel-head">Prior</div>' + _grid_cells("pri") + '</div>'
     )
     return (
-        '<div class="heatmap" data-payload="' + esc(json.dumps(grids)) + '">'
+        '<div class="heatmap" data-payload="' + esc(json.dumps(period_grids)) + '">'
         '<div class="chip-row" role="group" aria-label="Filter by position">'
         '<span class="chip-label">Position</span>' + options + '</div>'
         '<div class="chip-row" role="group" aria-label="Colour metric">'
@@ -279,9 +304,9 @@ def range_heatmap(grids: dict) -> str:
         '<button type="button" class="chip metric" data-metric="freq">'
         'Frequency played</button>'
         '<button type="button" class="chip metric" data-metric="bb100">bb/100</button>'
-        '</div>' + svg("".join(cells), w=w, h=h, cls="chart grid13")
-        + '<div class="scale-legend"></div>'
-        + '<div class="tooltip" hidden></div></div>'
+        '</div><div class="panels">' + panels + '</div>'
+        '<div class="scale-legend"></div>'
+        '<div class="tooltip" hidden></div></div>'
     )
 
 
@@ -303,6 +328,8 @@ def rolling_trend(rows, targets: dict) -> str:
     f = Frame(rows[0]["hand"], max(xhi, rows[-1]["hand"]), ylo, yhi, h=340)
     out = [f.grid(yticks, xticks, yfmt=lambda v: f"{v:.0f}%",
                   ylabel="Frequency", xlabel="Hands played")]
+    out.append(f'<rect class="period-band" x="{f.left}" y="{f.top}" width="0" '
+               f'height="{f.bottom - f.top:.1f}"/>')
 
     for key, _, cls in keys:
         target = targets.get(key)
@@ -321,7 +348,12 @@ def rolling_trend(rows, targets: dict) -> str:
             f'<text class="direct-label {cls}" x="{f.right + 6}" '
             f'y="{f.sy(last[key]) + 4:.1f}">{esc(name)}</text>'
         )
-    return svg("".join(out), h=340)
+    # x is a hand number here, not an index, so the band needs the domain as
+    # well as the pixel extent to place itself.
+    payload = json.dumps({"left": f.left, "right": f.right,
+                          "x0": f.x0, "x1": f.x1})
+    return ('<div class="chart-wrap" data-chart="rolling" data-payload="'
+            + esc(payload) + '">' + svg("".join(out), h=340) + '</div>')
 
 
 # ---------------------------------------------------------------------------

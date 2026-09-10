@@ -164,11 +164,13 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: upp
 tbody tr:last-child td { border-bottom: none; }
 td.ci { color: var(--muted); font-size: 12.5px; }
 td.thin { color: var(--muted); }
-.pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 500; }
+.pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
 .pill.good { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
 .pill.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--ink); }
 .pill.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
 .pill.none { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--ink-2); }
+/* "n too small" is not a soft failure and must not borrow the failure colour. */
+.pill.thin { background: transparent; color: var(--muted); border: 1px dashed var(--border); }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
 .chip-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-right: 4px; }
 .chip {
@@ -183,6 +185,24 @@ td.thin { color: var(--muted); }
 .scale-legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); justify-content: center; margin-top: 6px; }
 .scale-legend .ramp { display: flex; }
 .scale-legend .ramp i { width: 16px; height: 10px; display: block; }
+.panels { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+.panels .panel { flex: 1 1 320px; max-width: 500px; }
+.panel-head { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); text-align: center; margin-bottom: 2px; }
+/* The shaded period on the cumulative charts. Neutral ink rather than an
+   accent colour: it marks an extent, it is not a fifth data series. */
+.period-band { fill: var(--ink); opacity: .07; }
+/* A delta is never coloured by sign. Donk flop falling six points is not good
+   news or bad news until you know what you were trying to do, and a red number
+   would answer that question for the reader before they had asked it. */
+td.delta { color: var(--ink); font-weight: 500; white-space: nowrap; }
+td.delta.none { color: var(--muted); font-weight: 400; }
+td.prior { color: var(--ink-2); }
+td small.per100 { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.period-bar .chip-count { opacity: .6; }
+.period-bar { margin: 0 0 18px; }
+.period-bar .chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.period-note { font-size: 12.5px; color: var(--muted); margin: -10px 0 18px; }
 details { margin-top: 10px; }
 summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
 .empty { color: var(--muted); font-style: italic; padding: 20px 0; }
@@ -244,6 +264,15 @@ JS = """
 (function () {
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+
+  // The selected period, and everything that needs telling when it changes.
+  // Sections that re-render server-side are swapped wholesale; the charts and
+  // the heatmap instead redraw from data they already hold, because they show
+  // the selected period in the context of the whole history rather than alone.
+  let PERIOD = 'all';
+  let BANDS = {};
+  let RAWS = {};
+  const listeners = [];
 
   function isDark() {
     const t = document.documentElement.getAttribute('data-theme');
@@ -311,22 +340,76 @@ JS = """
     target.addEventListener('mouseleave', function () {
       hair.style.display = 'none'; tip.hidden = true;
     });
+
+    const band = $('.period-band', wrap);
+    listeners.push(function () {
+      const b = BANDS[PERIOD];
+      if (!band) return;
+      if (!b) { band.setAttribute('width', 0); return; }
+      const at = i => d.left + ((i - d.x0) / Math.max(1, d.x1 - d.x0)) * (d.right - d.left);
+      const x0 = at(b[0]), x1 = at(b[1]);
+      band.setAttribute('x', x0.toFixed(1));
+      band.setAttribute('width', Math.max(1.5, x1 - x0).toFixed(1));
+    });
   });
 
-  // ---- range heatmap: position filter + metric switch
+  // ---- rolling discipline: the same band, on a hand-number axis
+  $$('[data-chart="rolling"]').forEach(function (wrap) {
+    const d = JSON.parse(wrap.dataset.payload);
+    const band = $('.period-band', wrap);
+    if (!band) return;
+    listeners.push(function () {
+      const b = BANDS[PERIOD];
+      if (!b) { band.setAttribute('width', 0); return; }
+      const at = v => d.left + ((v - d.x0) / Math.max(1, d.x1 - d.x0)) * (d.right - d.left);
+      const x0 = Math.max(d.left, Math.min(d.right, at(b[0])));
+      const x1 = Math.max(d.left, Math.min(d.right, at(b[1])));
+      band.setAttribute('x', x0.toFixed(1));
+      band.setAttribute('width', Math.max(0, x1 - x0).toFixed(1));
+    });
+  });
+
+  // ---- range heatmap: position filter, metric switch, selected-vs-prior
   $$('.heatmap').forEach(function (wrap) {
-    const grids = JSON.parse(wrap.dataset.payload);
+    const data = JSON.parse(wrap.dataset.payload);
     const tip = $('.tooltip', wrap), legend = $('.scale-legend', wrap);
-    let pos = Object.keys(grids)[0], metric = 'freq';
+    const priPanel = $('.panel[data-side="pri"]', wrap);
+    const selHead = $('.panel[data-side="sel"] .panel-head', wrap);
+    let pos = 'All', metric = 'freq';
+
+    // Cells arrive as [n, vpip, bb100]; the field names cost more than the
+    // numbers, and every period carries a grid for both panels.
+    function cellOf(side, combo) {
+      const p = data[PERIOD] || data.all || {};
+      const g = (p[side] || {})[pos] || {};
+      const v = g[combo];
+      if (!v || !v[0]) return null;
+      return { n: v[0], vpip: v[1], freq: 100 * v[1] / v[0], bb100: v[2] };
+    }
 
     function paint() {
-      const g = grids[pos] || {};
-      const vals = Object.values(g).map(v => v[metric]).filter(v => v !== null && v !== undefined);
-      const maxAbs = Math.max(1, ...vals.map(Math.abs));
+      const p = data[PERIOD] || data.all || {};
+      const two = PERIOD !== 'all' && !!p.pri;
+      priPanel.hidden = !two;
+      selHead.textContent = two ? 'Selected period' : 'All hands';
+      const sides = two ? ['sel', 'pri'] : ['sel'];
+
+      // One scale across both panels. Two grids scaled independently would
+      // show a difference in colour that is not a difference in the data.
+      let maxAbs = 1;
+      sides.forEach(function (side) {
+        const g = (p[side] || {})[pos] || {};
+        Object.keys(g).forEach(function (k) {
+          const v = g[k][2];
+          if (v !== null && v !== undefined) maxAbs = Math.max(maxAbs, Math.abs(v));
+        });
+      });
+
       $$('.cellg', wrap).forEach(function (cell) {
-        const combo = cell.dataset.combo, d = g[combo];
+        const d = cellOf(cell.dataset.side, cell.dataset.combo);
         const rect = $('rect', cell), label = $('text', cell);
-        if (!d || d.n === 0 || d[metric] === null || d[metric] === undefined) {
+        const value = d ? d[metric] : null;
+        if (value === null || value === undefined) {
           rect.setAttribute('fill', 'none');
           rect.setAttribute('stroke-dasharray', '2 2');
           label.setAttribute('fill', 'var(--muted)');
@@ -342,6 +425,7 @@ JS = """
         rect.setAttribute('fill', fill);
         label.setAttribute('fill', lum(fill) > 0.42 ? '#0b0b0b' : '#ffffff');
       });
+
       const steps = [];
       for (let i = 0; i <= 8; i++) {
         const t = i / 8;
@@ -365,87 +449,129 @@ JS = """
 
     $$('.cellg', wrap).forEach(function (cell) {
       cell.addEventListener('mousemove', function (ev) {
-        const d = (grids[pos] || {})[cell.dataset.combo];
+        const d = cellOf(cell.dataset.side, cell.dataset.combo);
+        const which = cell.dataset.side === 'pri' ? 'prior' : 'selected';
         tip.hidden = false;
-        tip.innerHTML = '<b>' + cell.dataset.combo + '</b> &middot; ' + pos + '<br>' +
-          (d && d.n ? ('dealt ' + d.n + ' time' + (d.n === 1 ? '' : 's') + '<br>played ' +
-            (d.freq === null ? '-' : d.freq.toFixed(0) + '%') + '<br>' +
-            (d.bb100 === null ? '' : d.bb100.toFixed(0) + ' bb/100'))
-                     : 'never dealt');
+        tip.innerHTML = '<b>' + cell.dataset.combo + '</b> &middot; ' + pos +
+          (PERIOD === 'all' ? '' : ' &middot; ' + which) + '<br>' +
+          (d ? ('dealt ' + d.n + ' time' + (d.n === 1 ? '' : 's') + '<br>played ' +
+            d.freq.toFixed(0) + '%' +
+            (d.bb100 === null ? '' : '<br>' + d.bb100.toFixed(0) + ' bb/100'))
+             : 'never dealt');
         place(tip, wrap, ev);
       });
       cell.addEventListener('mouseleave', () => { tip.hidden = true; });
     });
+    listeners.push(paint);
     paint();
   });
 
 
   // ---- biggest pots: table switch, column sort, raw-text panel
-  $$('[data-drilldown]').forEach(function (wrap) {
-    const raws = JSON.parse(wrap.dataset.payload);
-    const panel = $('.raw-panel', wrap);
-    const pre = $('pre', panel), head = $('.raw-head span', panel);
+  // Bound through a function rather than inline, because the period filter
+  // replaces this section's markup wholesale and the handlers go with it.
+  function initDrilldown(root) {
+    $$('[data-drilldown]', root).forEach(function (wrap) {
+      const panel = $('.raw-panel', wrap);
+      const pre = $('pre', panel), head = $('.raw-head span', panel);
 
-    $$('.chip[data-tbl]', wrap).forEach(function (b) {
-      b.addEventListener('click', function () {
-        $$('.chip[data-tbl]', wrap).forEach(o =>
-          o.setAttribute('aria-pressed', String(o === b)));
-        $$('table.hands', wrap).forEach(t => { t.hidden = t.dataset.tbl !== b.dataset.tbl; });
-        // The open hand belongs to the table being switched away from.
-        $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
-        panel.hidden = true;
+      $$('.chip[data-tbl]', wrap).forEach(function (b) {
+        b.addEventListener('click', function () {
+          $$('.chip[data-tbl]', wrap).forEach(o =>
+            o.setAttribute('aria-pressed', String(o === b)));
+          $$('table.hands', wrap).forEach(t => { t.hidden = t.dataset.tbl !== b.dataset.tbl; });
+          // The open hand belongs to the table being switched away from.
+          $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
+          panel.hidden = true;
+        });
       });
-    });
 
-    // Sort on any column. Numeric columns carry data-v so "-12.4" and a blank
-    // cell order correctly regardless of how they are formatted for display.
-    $$('table.hands', wrap).forEach(function (table) {
-      const body = $('tbody', table);
-      $$('th.sortable-col', table).forEach(function (th, idx) {
-        th.addEventListener('click', function () {
-          const num = th.dataset.type === 'num';
-          const desc = th.getAttribute('aria-sort') !== 'descending';
-          const rows = $$('tr', body);
-          rows.sort(function (a, b) {
-            const ca = a.children[idx], cb = b.children[idx];
-            let x, y;
-            if (num) {
-              x = parseFloat(ca.dataset.v); y = parseFloat(cb.dataset.v);
-              if (isNaN(x)) x = -Infinity;
-              if (isNaN(y)) y = -Infinity;
-            } else {
-              x = (ca.dataset.v || ca.textContent).trim().toLowerCase();
-              y = (cb.dataset.v || cb.textContent).trim().toLowerCase();
-            }
-            if (x < y) return desc ? 1 : -1;
-            if (x > y) return desc ? -1 : 1;
-            return 0;
+      // Sort on any column. Numeric columns carry data-v so "-12.4" and a blank
+      // cell order correctly regardless of how they are formatted for display.
+      $$('table.hands', wrap).forEach(function (table) {
+        const body = $('tbody', table);
+        $$('th.sortable-col', table).forEach(function (th, idx) {
+          th.addEventListener('click', function () {
+            const num = th.dataset.type === 'num';
+            const desc = th.getAttribute('aria-sort') !== 'descending';
+            const rows = $$('tr', body);
+            rows.sort(function (a, b) {
+              const ca = a.children[idx], cb = b.children[idx];
+              let x, y;
+              if (num) {
+                x = parseFloat(ca.dataset.v); y = parseFloat(cb.dataset.v);
+                if (isNaN(x)) x = -Infinity;
+                if (isNaN(y)) y = -Infinity;
+              } else {
+                x = (ca.dataset.v || ca.textContent).trim().toLowerCase();
+                y = (cb.dataset.v || cb.textContent).trim().toLowerCase();
+              }
+              if (x < y) return desc ? 1 : -1;
+              if (x > y) return desc ? -1 : 1;
+              return 0;
+            });
+            rows.forEach(r => body.appendChild(r));
+            $$('th.sortable-col', table).forEach(o => o.removeAttribute('aria-sort'));
+            th.setAttribute('aria-sort', desc ? 'descending' : 'ascending');
           });
-          rows.forEach(r => body.appendChild(r));
-          $$('th.sortable-col', table).forEach(o => o.removeAttribute('aria-sort'));
-          th.setAttribute('aria-sort', desc ? 'descending' : 'ascending');
+        });
+      });
+
+      $$('.hand-btn', wrap).forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const open = btn.getAttribute('aria-expanded') === 'true';
+          $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
+          if (open) { panel.hidden = true; return; }
+          btn.setAttribute('aria-expanded', 'true');
+          // One pool of hand text for every period: the biggest-pot lists
+          // overlap heavily, and re-reading the same hand per period would
+          // inline it five times over.
+          const txt = RAWS[btn.dataset.hand];
+          head.textContent = txt ? ('Hand #' + btn.dataset.no)
+            : ('Hand #' + btn.dataset.no + ' — source file no longer readable');
+          pre.textContent = txt || '';
+          panel.hidden = false;
+          panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         });
       });
     });
+  }
+  initDrilldown(document);
 
-    $$('.hand-btn', wrap).forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        const open = btn.getAttribute('aria-expanded') === 'true';
-        $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
-        if (open) { panel.hidden = true; return; }
-        btn.setAttribute('aria-expanded', 'true');
-        const txt = raws[btn.dataset.hand];
-        head.textContent = txt ? ('Hand #' + btn.dataset.no)
-          : ('Hand #' + btn.dataset.no + ' — source file no longer readable');
-        pre.textContent = txt || '';
-        panel.hidden = false;
-        panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  // ---- period filter
+  const periodData = document.getElementById('period-data');
+  if (periodData) {
+    const D = JSON.parse(periodData.textContent);
+    RAWS = D.raws || {};
+    D.periods.forEach(function (p) { if (p.band) BANDS[p.key] = p.band; });
+
+    function applyPeriod(key) {
+      PERIOD = key;
+      const regions = D.regions[key] || {};
+      Object.keys(regions).forEach(function (id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.innerHTML = regions[id];
+        initDrilldown(el);
       });
+      $$('.period-bar .chip').forEach(b =>
+        b.setAttribute('aria-pressed', String(b.dataset.period === key)));
+      listeners.forEach(function (fn) { fn(); });
+    }
+
+    $$('.period-bar .chip').forEach(function (b) {
+      b.addEventListener('click', function () { applyPeriod(b.dataset.period); });
     });
-  });
+    // Deliberately not restored from storage and never defaulted to anything
+    // but "All": the pull with a period filter is to open the report after
+    // every session and read today's win rate, which is a number with a
+    // +/-150 bb/100 interval on it.
+    listeners.forEach(function (fn) { fn(); });
+  }
 
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
-    $$('.heatmap .chip[aria-pressed="true"]').forEach(b => b.click());
+    listeners.forEach(function (fn) { fn(); });
   });
 })();
 """
@@ -511,31 +637,126 @@ LIVE_JS = """
 """
 
 
-def _pill(ok) -> str:
-    if ok is True:
-        return '<span class="pill good">on plan</span>'
-    if ok is False:
-        return '<span class="pill bad">off plan</span>'
-    return '<span class="pill none">watch</span>'
+_PILLS = {
+    "ok": '<span class="pill good">on plan</span>',
+    "off": '<span class="pill bad">off plan</span>',
+    "watch": '<span class="pill none">watch</span>',
+    # Not a soft failure. "0 opens out of 2 opportunities" is not a player who
+    # never opens the button; it is a window that cannot answer the question,
+    # and saying "off plan" there teaches the reader to distrust the pills.
+    "thin": '<span class="pill thin">n too small</span>',
+}
 
 
-def _rate_table(rows, caption: str = "") -> str:
+def _pill(status) -> str:
+    return _PILLS.get(status, _PILLS["watch"])
+
+
+def _delta_cell(new, old, unit: str, enough: bool = True) -> str:
+    """One difference, unsigned by colour and blank when it would be noise."""
+    if not enough or new is None or old is None:
+        return ('<td class="delta none" title="Too few opportunities on one '
+                'side for the difference to mean anything">&ndash;</td>')
+    d = new - old
+    return f'<td class="delta">{d:+.1f}{unit}</td>'
+
+
+def _rate_table(rows, prior=None) -> str:
+    """Rates with their intervals, and against the prior period when filtered.
+
+    The delta column is the point of the period filter: "is the thing I am
+    working on moving" is a different question from "what is my donk-flop
+    frequency", and only the first one has an answer on a Tuesday. It is left
+    blank whenever either side has fewer than MIN_OPPS opportunities, because
+    the difference between two noisy numbers is noisier than either of them.
+    """
+    if prior is None:
+        body = []
+        for r in rows:
+            pct = "-" if r["pct"] is None else f"{r['pct']:.1f}%"
+            ci = ("-" if r["ci_lo"] is None or not r["den"]
+                  else f"{r['ci_lo']:.1f} - {r['ci_hi']:.1f}")
+            body.append(
+                f"<tr><td>{esc(r['name'])}</td><td>{pct}</td>"
+                f"<td class='ci'>{ci}</td>"
+                f"<td class='thin'>{int(r['num'])} / {int(r['den'])}</td></tr>"
+            )
+        return (
+            "<table><thead><tr><th>Stat</th><th>Rate</th>"
+            "<th>95% CI</th><th>n</th></tr></thead><tbody>"
+            + "".join(body) + "</tbody></table>"
+        )
+
+    by_name = {r["name"]: r for r in prior}
     body = []
     for r in rows:
+        o = by_name.get(r["name"], {"pct": None, "den": 0, "num": 0})
         pct = "-" if r["pct"] is None else f"{r['pct']:.1f}%"
+        opct = "-" if o["pct"] is None else f"{o['pct']:.1f}%"
         ci = ("-" if r["ci_lo"] is None or not r["den"]
               else f"{r['ci_lo']:.1f} - {r['ci_hi']:.1f}")
+        enough = r["den"] >= stats.MIN_OPPS and o["den"] >= stats.MIN_OPPS
         body.append(
             f"<tr><td>{esc(r['name'])}</td><td>{pct}</td>"
-            f"<td class='ci'>{ci}</td>"
+            f"<td class='prior'>{opct}</td>"
+            + _delta_cell(r["pct"], o["pct"], "", enough)
+            + f"<td class='ci'>{ci}</td>"
             f"<td class='thin'>{int(r['num'])} / {int(r['den'])}</td></tr>"
         )
-    cap = f"<caption>{esc(caption)}</caption>" if caption else ""
     return (
-        f"<table>{cap}<thead><tr><th>Stat</th><th>Rate</th>"
-        f"<th>95% CI</th><th>n</th></tr></thead><tbody>"
+        "<table><thead><tr><th>Stat</th><th>Selected</th><th>Prior</th>"
+        "<th>&Delta;</th><th>95% CI (selected)</th><th>n</th></tr></thead><tbody>"
         + "".join(body) + "</tbody></table>"
     )
+
+
+def _compliance_table(rows, prior=None) -> str:
+    """Compliance checks as rates, not as counters that only go up.
+
+    A cumulative count stops carrying information after the first week: once
+    "SB cold calls" reads 11 it reads 11 forever, and no amount of good play
+    moves it. Both the per-100-hand rate and the comparison against the prior
+    period exist so the number can come down.
+    """
+    def value_cell(c, cls=""):
+        if c["kind"] == "count":
+            per = ("" if c["per100"] is None else
+                   f"<small class='per100'>{c['per100']:.2f} per 100</small>")
+            return f"<td class='{cls}'>{int(c['num'])}{per}</td>"
+        pct = "-" if c["value"] is None else f"{c['value']:.1f}%"
+        return (f"<td class='{cls}'>{pct}"
+                f"<small class='per100'>{int(c['num'])} / {int(c['den'])}</small></td>")
+
+    by_name = {c["name"]: c for c in (prior or [])}
+    body = []
+    for c in rows:
+        cells = [f"<td>{esc(c['name'])}</td>", value_cell(c)]
+        if prior is not None:
+            o = by_name.get(c["name"])
+            if o is None:
+                cells.append("<td class='prior'>-</td>")
+                cells.append(_delta_cell(None, None, "", False))
+            else:
+                cells.append(value_cell(o, "prior"))
+                if c["kind"] == "count":
+                    # Raw counts across windows of different sizes are not
+                    # comparable; the per-100 rate is what "more or less than
+                    # before" actually means.
+                    cells.append(_delta_cell(c["per100"], o["per100"], " /100",
+                                             bool(c["den"] and o["den"])))
+                else:
+                    enough = (c["den"] >= stats.MIN_OPPS
+                              and o["den"] >= stats.MIN_OPPS)
+                    cells.append(_delta_cell(c["value"], o["value"], " pp", enough))
+        cells.append(f"<td class='thin'>{esc(c['target'])}</td>")
+        cells.append(f"<td>{_pill(c['status'])}</td>")
+        cells.append(f"<td class='thin'>{esc(c['note'])}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+
+    extra = "<th>Prior</th><th>&Delta;</th>" if prior is not None else ""
+    head = (f"<tr><th>Check</th><th>Selected</th>{extra}"
+            f"<th>Target</th><th></th><th>Note</th></tr>")
+    return f"<table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
 
 
 HAND_COLUMNS = [
@@ -588,19 +809,18 @@ def _hand_table(rows, key: str, hidden: bool) -> str:
             f'<thead><tr>{head}</tr></thead><tbody>{_hand_rows(rows)}</tbody></table>')
 
 
-def _drilldown(conn, hero: str, limit: int = 15) -> str:
+def _drilldown(conn, hero: str, window, limit: int = 15):
     """Top losses and top wins, each row expandable to the original text.
 
-    The raw text is inlined rather than linked because the report is a single
-    self-contained file: a file:// link into the history folder would break the
-    moment the report is copied anywhere.
+    Returns the markup and the hand ids it references. The text itself is
+    pooled across every period by the caller rather than inlined here: the
+    biggest-pot lists overlap heavily, and a per-period copy would put the same
+    hand in the file five times.
     """
-    pots = stats.big_pots(conn, hero, limit)
+    pots = stats.big_pots(conn, hero, limit, window)
     ids = [r["hand_id"] for r in pots["losses"] + pots["wins"]]
-    raws = db.hand_texts(conn, ids)
-    payload = json.dumps({str(k): v for k, v in raws.items()})
     n_loss, n_win = len(pots["losses"]), len(pots["wins"])
-    return f"""<div class="card" data-drilldown data-payload='{esc(payload)}'>
+    html = f"""<div class="card" data-drilldown>
 <div class="chip-row"><span class="chip-label">Show</span>
 <button type="button" class="chip" data-tbl="losses" aria-pressed="true">
 Top {n_loss} losses</button>
@@ -612,46 +832,98 @@ Top {n_win} wins</button></div>
 the original PokerStars text.</p>
 <div class="raw-panel" hidden><div class="raw-head"><span></span></div><pre></pre></div>
 </div>"""
+    return html, ids
 
 
-def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
-    m = stats.money_summary(conn, hero)
-    if not m.get("hands"):
-        return "<h1>No hands imported</h1>"
+def _compact_grid(grid: dict) -> dict:
+    """[n, vpip, bb100] per combo. See the note in charts.range_heatmap."""
+    return {c: [v["n"], v["vpip"],
+                None if v["bb100"] is None else round(v["bb100"], 1)]
+            for c, v in grid.items()}
 
-    rows = stats.bb_series(conn, hero)
-    pos_rows = stats.by_position(conn, hero)
-    pre = stats.preflop_stats(conn, hero)
-    post = stats.postflop_stats(conn, hero)
-    ag = stats.aggression(conn, hero)
-    comp = stats.compliance(conn, hero)
-    sess = stats.sessions(conn, hero)
-    funnel_rows = stats.street_funnel(conn, hero)
-    buckets = stats.pot_buckets(conn, hero)
-    stacks = stats.stack_histogram(conn, hero)
-    roll_window = 1000 if m["hands"] >= 1000 else max(25, m["hands"] // 3)
-    roll = stats.rolling(conn, hero, roll_window)
-    tables = stats.by_table_count(conn, hero)
-    hours = stats.by_time(conn, hero, "%H")
-    days = stats.by_time(conn, hero, "%w")
-    drilldown = _drilldown(conn, hero)
-    n_problems = stats.problem_count(conn)
 
-    grids = {"All": stats.range_grid(conn, hero)}
-    for p in POSITION_ORDER:
-        g = stats.range_grid(conn, hero, p)
-        if g:
-            grids[p] = g
+def _rate_of(rows, name: str):
+    r = next((x for x in rows if x["name"] == name), None)
+    return None if r is None or r["pct"] is None else r["pct"]
 
-    ev_tile = ""
-    if m["has_ev"]:
-        ev_tile = (
-            f'<div class="tile"><div class="k">All-in adjusted</div>'
-            f'<div class="v">{m["ev_bb100"]:+.1f}</div>'
-            f'<div class="m">bb/100 &middot; luck {m["ev_diff_bb100"]:+.1f}</div></div>'
+
+def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: str):
+    """Every part of the page that a period filter changes.
+
+    Each fragment is rendered here, once per period, and swapped into place in
+    the browser. The report has to open from file:// with no server behind it,
+    so the alternative -- asking the pipeline to recompute on selection -- is
+    not available.
+    """
+    w = period.selected
+    prior_w = None if period.is_all else period.prior
+    filtered = not period.is_all
+
+    m = stats.money_summary(conn, hero, w)
+    pre = stats.preflop_stats(conn, hero, w)
+    post = stats.postflop_stats(conn, hero, w)
+    ag = stats.aggression(conn, hero, w)
+    comp = stats.compliance(conn, hero, w)
+    pre_prior = stats.preflop_stats(conn, hero, prior_w) if filtered else None
+    post_prior = stats.postflop_stats(conn, hero, prior_w) if filtered else None
+    comp_prior = stats.compliance(conn, hero, prior_w) if filtered else None
+
+    pos_rows = stats.by_position(conn, hero, w)
+    funnel_rows = stats.street_funnel(conn, hero, w)
+    buckets = stats.pot_buckets(conn, hero, w)
+    stacks = stats.stack_histogram(conn, hero, 10, w)
+    tables = stats.by_table_count(conn, hero, w)
+    hours = stats.by_time(conn, hero, "%H", w)
+    days = stats.by_time(conn, hero, "%w", w)
+    n_sessions = len(stats.sessions(conn, hero, w))
+    drill_html, drill_ids = _drilldown(conn, hero, w, 15 if period.is_all else 10)
+
+    # ---- tiles. Win rate is deliberately absent from a filtered view: one
+    # session is 100-300 hands and its interval is wider than any result it
+    # could show, so a tile there would only invite the reader to try to read
+    # it. Hand count and the frequencies are what the window can support.
+    if filtered:
+        tiles = f"""
+    <div class="tiles">
+      <div class="tile"><div class="k">Hands</div>
+        <div class="v">{m['hands']:,}</div>
+        <div class="m">{n_sessions} session{'' if n_sessions == 1 else 's'}
+        &middot; {m['hands'] * 100 // max(1, period.selected.hands + period.prior.hands)}%
+        of the sample</div></div>
+      <div class="tile"><div class="k">VPIP</div>
+        <div class="v">{fmt(_rate_of(pre, 'VPIP'), 1)}%</div>
+        <div class="m">voluntarily put in pot</div></div>
+      <div class="tile"><div class="k">PFR</div>
+        <div class="v">{fmt(_rate_of(pre, 'PFR'), 1)}%</div>
+        <div class="m">preflop raise</div></div>
+      <div class="tile"><div class="k">3-Bet</div>
+        <div class="v">{fmt(_rate_of(pre, '3-Bet'), 1)}%</div>
+        <div class="m">of opportunities</div></div>
+      <div class="tile"><div class="k">Rake paid</div>
+        <div class="v">{m['rake_bb100']:.1f}</div>
+        <div class="m">bb/100</div></div>
+    </div>"""
+        banner = (
+            '<div class="banner"><b>Win rate is not shown for a filtered '
+            f'period, on purpose.</b> Over {m["hands"]:,} hands the 95% interval '
+            f'on bb/100 is roughly &plusmn;{m["ci95"]:.0f}, which is wider than '
+            'any result it could report, so the number would be pure noise '
+            'wearing a decimal point. Frequencies converge in thousands of '
+            'hands rather than hundreds &mdash; those are what this view is '
+            'for. Switch back to <b>All</b> for the win rate.</div>'
         )
-
-    tiles = f"""
+        sub = (f"{esc(period.label)} &middot; {m['hands']:,} hands &middot; "
+               f"{esc(m['first_hand'][:16])} to {esc(m['last_hand'][:16])} "
+               f"&middot; compared against the {period.prior.hands:,} hands before it")
+    else:
+        ev_tile = ""
+        if m["has_ev"]:
+            ev_tile = (
+                f'<div class="tile"><div class="k">All-in adjusted</div>'
+                f'<div class="v">{m["ev_bb100"]:+.1f}</div>'
+                f'<div class="m">bb/100 &middot; luck {m["ev_diff_bb100"]:+.1f}</div></div>'
+            )
+        tiles = f"""
     <div class="tiles">
       <div class="tile"><div class="k">Win rate</div>
         <div class="v">{m['bb100']:+.1f}</div>
@@ -659,7 +931,7 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
       {ev_tile}
       <div class="tile"><div class="k">Hands</div>
         <div class="v">{m['hands']:,}</div>
-        <div class="m">{len(sess)} session{'' if len(sess) == 1 else 's'}</div></div>
+        <div class="m">{n_sessions} session{'' if n_sessions == 1 else 's'}</div></div>
       <div class="tile"><div class="k">Rake paid</div>
         <div class="v">{m['rake_bb100']:.1f}</div>
         <div class="m">bb/100 &middot; gross {m['gross_bb100']:+.1f}</div></div>
@@ -667,28 +939,18 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
         <div class="v">{m['sd_bb100']:.0f}</div>
         <div class="m">bb/100</div></div>
     </div>"""
-
-    ci_lo, ci_hi = m["bb100"] - m["ci95"], m["bb100"] + m["ci95"]
-    banner = (
-        f'<div class="banner"><b>Read the interval, not the number.</b> '
-        f'At {m["hands"]:,} hands your measured {m["bb100"]:+.1f} bb/100 is '
-        f'statistically indistinguishable from anything between '
-        f'{ci_lo:+.1f} and {ci_hi:+.1f}. Win rate is the last thing that '
-        f'becomes reliable, not the first &mdash; judge yourself on the '
-        f'frequencies and the compliance checks until the sample catches up.</div>'
-    )
-
-    legend = (
-        '<div class="legend">'
-        '<span><i style="border-color:var(--total)"></i>Total (net)</span>'
-        '<span><i style="border-color:var(--showdown);border-top-style:dashed"></i>'
-        'Showdown &mdash; blue line</span>'
-        '<span><i style="border-color:var(--nonshowdown);border-top-style:dotted"></i>'
-        'Non-showdown &mdash; red line</span>'
-        + ('<span><i style="border-color:var(--ev);border-top-style:dashed"></i>'
-           'All-in adjusted EV</span>' if m["has_ev"] else "")
-        + '</div>'
-    )
+        ci_lo, ci_hi = m["bb100"] - m["ci95"], m["bb100"] + m["ci95"]
+        banner = (
+            f'<div class="banner"><b>Read the interval, not the number.</b> '
+            f'At {m["hands"]:,} hands your measured {m["bb100"]:+.1f} bb/100 is '
+            f'statistically indistinguishable from anything between '
+            f'{ci_lo:+.1f} and {ci_hi:+.1f}. Win rate is the last thing that '
+            f'becomes reliable, not the first &mdash; judge yourself on the '
+            f'frequencies and the compliance checks until the sample catches up.</div>'
+        )
+        sub = (f"{m['hands']:,} hands {esc(stake_txt)} &middot; "
+               f"{esc(m['first_hand'][:16])} to {esc(m['last_hand'][:16])} &middot; "
+               f"generated {esc(generated)}")
 
     pos_table = "".join(
         "<tr><td>{}</td><td>{}</td><td>{}%</td><td>{}%</td><td>{}</td>"
@@ -698,32 +960,12 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
             r["bb100"], r["ci95"])
         for r in pos_rows
     )
-
-    comp_rows = "".join(
-        "<tr><td>{}</td><td>{}</td><td class='thin'>{}</td><td>{}</td>"
-        "<td class='thin'>{}</td></tr>".format(
-            esc(c["name"]),
-            "-" if c["value"] is None else
-            (f"{c['value']:.1f}%" if c["unit"] == "pct" else f"{c['value']}"),
-            esc(c["target"]), _pill(c["ok"]), esc(c["note"]))
-        for c in comp
-    )
-
-    rel_rows = "".join(
-        "<tr><td>{}</td><td>{:,}</td><td class='thin'>{:,}</td><td>{}</td></tr>".format(
-            esc(r["stat"]), r["have"], r["needed"],
-            '<span class="pill good">usable</span>' if r["ready"]
-            else f'<span class="pill none">{r["pct"]:.0f}%</span>')
-        for r in stats.reliability(m["hands"])
-    )
-
     table_rows = "".join(
         "<tr><td>{} table{}</td><td>{:,}</td><td>{}</td></tr>".format(
             r["tables"], "" if r["tables"] == 1 else "s", r["hands"],
             "-" if r["bb100"] is None else f"{r['bb100']:+.1f}")
         for r in tables
     )
-
     DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     day_rows = "".join(
         "<tr><td>{}</td><td>{:,}</td><td>{}</td></tr>".format(
@@ -737,6 +979,156 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
             "-" if r["bb100"] is None else f"{r['bb100']:+.1f}")
         for r in hours
     )
+    rel_rows = "".join(
+        "<tr><td>{}</td><td>{:,}</td><td class='thin'>{:,}</td><td>{}</td></tr>".format(
+            esc(r["stat"]), r["have"], r["needed"],
+            '<span class="pill good">usable</span>' if r["ready"]
+            else f'<span class="pill none">{r["pct"]:.0f}%</span>')
+        for r in stats.reliability(m["hands"])
+    )
+
+    wwsf = next((r for r in post if r["name"] == "WWSF"), None)
+    wtsd = next((r for r in post if r["name"] == "WTSD"), None)
+    wsd = next((r for r in post if r["name"] == "W$SD"), None)
+
+    grids = {"sel": {k: _compact_grid(stats.range_grid(
+        conn, hero, None if k == "All" else k, w)) for k in positions}}
+    if filtered:
+        grids["pri"] = {k: _compact_grid(stats.range_grid(
+            conn, hero, None if k == "All" else k, prior_w)) for k in positions}
+
+    regions = {
+        "r-sub": sub,
+        "r-tiles": tiles,
+        "r-banner": banner,
+        "r-position": (
+            f'<div class="card">{charts.position_bars(pos_rows)}'
+            f'<details><summary>Table view</summary>'
+            f'<table><thead><tr><th>Position</th><th>Hands</th><th>VPIP</th>'
+            f'<th>PFR</th><th>3-Bet</th><th>bb/100</th><th>95% CI</th></tr></thead>'
+            f'<tbody>{pos_table}</tbody></table></details></div>'
+        ),
+        "r-preflop": f'<div class="card">{_rate_table(pre, pre_prior)}</div>',
+        "r-postflop": (
+            f'<div class="card">{_rate_table(post, post_prior)}'
+            f'<table style="margin-top:14px"><thead><tr><th>Aggression</th>'
+            f'<th>Flop</th><th>Turn</th><th>River</th><th>All streets</th></tr>'
+            f'</thead><tbody>'
+            f"<tr><td>Frequency</td>{_street_cells(ag, 'afq', '%')}"
+            f"<td>{fmt(ag['afq'], 1)}%</td></tr>"
+            f"<tr><td>Factor</td>{_street_cells(ag, 'af', '')}"
+            f"<td>{fmt(ag['af'], 2)}</td></tr>"
+            f'</tbody></table></div>{_triangle_note(wwsf, wtsd, wsd)}'
+        ),
+        "r-compliance":
+            f'<div class="card">{_compliance_table(comp, comp_prior)}</div>',
+        "r-funnel": f'<div class="card">{charts.funnel(funnel_rows)}</div>',
+        "r-buckets": f'<div class="card">{charts.pot_buckets(buckets)}</div>',
+        "r-drilldown": drill_html,
+        "r-stacks": f'<div class="card">{charts.stack_histogram(stacks)}</div>',
+        "r-load": (
+            '<div class="card"><h3>Concurrent tables</h3>'
+            '<table><thead><tr><th>Load</th><th>Hands</th><th>bb/100</th></tr>'
+            f'</thead><tbody>{table_rows}</tbody></table>'
+            '<h3>By day of week</h3>'
+            '<table><thead><tr><th>Day</th><th>Hands</th><th>bb/100</th></tr>'
+            f'</thead><tbody>{day_rows}</tbody></table>'
+            '<h3>By hour of day</h3>'
+            '<table><thead><tr><th>Hour</th><th>Hands</th><th>bb/100</th></tr>'
+            f'</thead><tbody>{hour_rows}</tbody></table>'
+            f'<h3>Timeouts</h3><p class="note">{stats.timeouts(conn, hero, w)} '
+            'hand(s) where you timed out &mdash; a proxy for attention '
+            'overload.</p></div>'
+        ),
+        "r-sample": (
+            '<div class="card"><table><thead><tr><th>Stat</th><th>Hands</th>'
+            f'<th>Needed</th><th></th></tr></thead><tbody>{rel_rows}'
+            '</tbody></table></div>'
+        ),
+    }
+    return regions, grids, drill_ids
+
+
+def _json_script(payload: dict, element_id: str) -> str:
+    """Inline JSON that cannot terminate its own script element."""
+    text = json.dumps(payload, separators=(",", ":")).replace("<", "\\u003c")
+    return f'<script type="application/json" id="{element_id}">{text}</script>'
+
+
+def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
+    m = stats.money_summary(conn, hero)
+    if not m.get("hands"):
+        return "<h1>No hands imported</h1>"
+
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    stake = conn.execute(
+        "SELECT sb, bb, currency FROM hands ORDER BY played_at DESC LIMIT 1").fetchone()
+    stake_txt = f"${stake['sb'] / 100:.2f}/${stake['bb'] / 100:.2f}" if stake else ""
+
+    # These three are drawn once over the whole history no matter what is
+    # selected. A period is shaded on the two cumulative charts rather than
+    # plotted alone, because the only useful thing a single session's line can
+    # tell you is where it sits relative to everything before it.
+    rows = stats.bb_series(conn, hero)
+    roll_window = 1000 if m["hands"] >= 1000 else max(25, m["hands"] // 3)
+    roll = stats.rolling(conn, hero, roll_window)
+    sess = stats.sessions(conn, hero)
+    n_problems = stats.problem_count(conn)
+
+    positions = ["All"] + [p for p in POSITION_ORDER
+                           if stats.range_grid(conn, hero, p)]
+
+    periods = stats.periods(conn, hero)
+    regions, grids, hand_ids = {}, {}, []
+    meta = []
+    for period in periods:
+        r, g, ids = _fragments(conn, hero, period, positions, generated, stake_txt)
+        regions[period.key] = r
+        grids[period.key] = g
+        hand_ids.extend(ids)
+        band = (None if period.is_all
+                else stats.hand_index_range(conn, hero, period.selected))
+        meta.append({"key": period.key, "label": period.label,
+                     "hands": period.selected.hands, "band": band})
+
+    raws = db.hand_texts(conn, sorted(set(hand_ids)))
+    payload = _json_script(
+        {"periods": meta, "regions": regions,
+         "raws": {str(k): v for k, v in raws.items()}},
+        "period-data")
+
+    period_bar = ""
+    if len(periods) > 1:
+        chips = "".join(
+            f'<button type="button" class="chip" data-period="{esc(p["key"])}" '
+            f'aria-pressed="{"true" if p["key"] == "all" else "false"}">'
+            f'{esc(p["label"])}'
+            + ("" if p["key"] == "all" else
+               f' <span class="chip-count">({p["hands"]:,})</span>')
+            + '</button>'
+            for p in meta
+        )
+        period_bar = (
+            '<div class="chip-row period-bar" role="group" '
+            'aria-label="Filter by period">'
+            '<span class="chip-label">Period</span>' + chips + '</div>'
+            '<p class="period-note">Filters the tables, the frequencies and the '
+            'compliance checks, and adds a comparison against everything before '
+            'the selected window. The cumulative charts and the session list '
+            'always show the whole history, with the selected period shaded.</p>'
+        )
+
+    legend = (
+        '<div class="legend">'
+        '<span><i style="border-color:var(--total)"></i>Total (net)</span>'
+        '<span><i style="border-color:var(--showdown);border-top-style:dashed"></i>'
+        'Showdown &mdash; blue line</span>'
+        '<span><i style="border-color:var(--nonshowdown);border-top-style:dotted"></i>'
+        'Non-showdown &mdash; red line</span>'
+        + ('<span><i style="border-color:var(--ev);border-top-style:dashed"></i>'
+           'All-in adjusted EV</span>' if m["has_ev"] else "")
+        + '</div>'
+    )
 
     sess_rows = "".join(
         "<tr><td>{}</td><td>{:.0f} min</td><td>{:,}</td><td>{}</td>"
@@ -745,11 +1137,6 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
             s["n_tables"], s["bb100"])
         for s in sess
     )
-
-    wwsf = next((r for r in post if r["name"] == "WWSF"), None)
-    wtsd = next((r for r in post if r["name"] == "WTSD"), None)
-    wsd = next((r for r in post if r["name"] == "W$SD"), None)
-    triangle = _triangle_note(wwsf, wtsd, wsd)
 
     problems_block = ""
     if n_problems:
@@ -773,10 +1160,7 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
   <label class="auto"><input type="checkbox" id="auto"> auto every 60s</label>
 </div>""" if live else "")
     live_js = LIVE_JS if live else ""
-    generated = datetime.now().strftime("%Y-%m-%d %H:%M")
-    stake = conn.execute(
-        "SELECT sb, bb, currency FROM hands ORDER BY played_at DESC LIMIT 1").fetchone()
-    stake_txt = f"${stake['sb'] / 100:.2f}/${stake['bb'] / 100:.2f}" if stake else ""
+    a = regions["all"]
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -786,12 +1170,11 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
 <body><div class="wrap">
 
 <h1>{esc(hero)}</h1>
-<p class="sub">{m['hands']:,} hands {esc(stake_txt)} &middot;
-{esc(m['first_hand'][:16])} to {esc(m['last_hand'][:16])} &middot;
-generated {esc(generated)}</p>
+<p class="sub" id="r-sub">{a['r-sub']}</p>
 {toolbar}
-{tiles}
-{banner}
+{period_bar}
+<div id="r-tiles">{a['r-tiles']}</div>
+<div id="r-banner">{a['r-banner']}</div>
 
 <h2>1. Cumulative winnings</h2>
 <p class="note">This single chart is the reason trackers exist; everything else
@@ -805,45 +1188,35 @@ c-betting into people who never fold.</p>
 <p class="note">Error bars are 95% confidence intervals. They will be
 embarrassingly wide, and that is the point &mdash; the aggregate number hides
 almost everything interesting, and this is where leaks become visible.</p>
-<div class="card">{charts.position_bars(pos_rows)}
-<details><summary>Table view</summary>
-<table><thead><tr><th>Position</th><th>Hands</th><th>VPIP</th><th>PFR</th>
-<th>3-Bet</th><th>bb/100</th><th>95% CI</th></tr></thead>
-<tbody>{pos_table}</tbody></table></details></div>
+<div id="r-position">{a['r-position']}</div>
 
 <h2>3. Preflop</h2>
 <p class="note">Every denominator is opportunities, not hands. A big blind check
 is never VPIP; a big blind call of a raise is. Completing the small blind counts
 as VPIP but not PFR.</p>
-<div class="card">{_rate_table(pre)}</div>
+<div id="r-preflop">{a['r-preflop']}</div>
 
 <h2>4. Postflop</h2>
 <p class="note">"Won money" means collected any part of the pot, even if the hand
 was net negative after your own contribution.</p>
-<div class="card">{_rate_table(post)}
-<table style="margin-top:14px"><thead><tr><th>Aggression</th><th>Flop</th>
-<th>Turn</th><th>River</th><th>All streets</th></tr></thead><tbody>
-<tr><td>Frequency</td>{_street_cells(ag, 'afq', '%')}
-<td>{fmt(ag['afq'], 1)}%</td></tr>
-<tr><td>Factor</td>{_street_cells(ag, 'af', '')}
-<td>{fmt(ag['af'], 2)}</td></tr>
-</tbody></table></div>
-{triangle}
+<div id="r-postflop">{a['r-postflop']}</div>
 
 <h2>5. Compliance checks</h2>
 <p class="note">These answer whether you executed the plan, which is a different
 question from whether the plan is good &mdash; and a much more useful one early
-on, because they converge in a weekend rather than a year.</p>
-<div class="card"><table><thead><tr><th>Check</th><th>Value</th><th>Target</th>
-<th></th><th>Note</th></tr></thead><tbody>{comp_rows}</tbody></table></div>
+on, because they converge in a weekend rather than a year. Counts carry a rate
+per 100 hands beside them: a cumulative tally only goes up, so it stops telling
+you anything about the last week once it has a few entries in it.</p>
+<div id="r-compliance">{a['r-compliance']}</div>
 
 <h2>6. Starting-hand ranges</h2>
 <p class="note">How often each combo was voluntarily played, filtered by
 position &mdash; a single aggregated grid is meaningless, because button and
-UTG ranges differ by design. The bb/100 view is noisy below 100k hands and
+UTG ranges differ by design. With a period selected the grid splits in two, so
+range drift shows up directly. The bb/100 view is noisy below 100k hands and
 mostly decorative, but it does surface the "I keep losing money with A-rag
 offsuit" pattern.</p>
-<div class="card">{charts.range_heatmap(grids)}</div>
+<div class="card">{charts.range_heatmap(grids, positions)}</div>
 
 <h2>7. Rolling preflop discipline</h2>
 <p class="note">Trailing {roll_window:,}-hand window against target reference
@@ -853,27 +1226,29 @@ over weeks.{roll_caveat}</p>
 
 <h2>8. Street funnel</h2>
 <p class="note">Where in the hand your money actually moves.</p>
-<div class="card">{charts.funnel(funnel_rows)}</div>
+<div id="r-funnel">{a['r-funnel']}</div>
 
 <h2>9. Pot-size buckets</h2>
 <p class="note">Most micro-stakes losing players are fine in small pots and
 hemorrhage in big ones. If the losses concentrate in the top bucket, the problem
 is stack-off decisions, not preflop ranges.</p>
-<div class="card">{charts.pot_buckets(buckets)}</div>
+<div id="r-buckets">{a['r-buckets']}</div>
 
 <h2>10. Biggest pots</h2>
 <p class="note">Every other section ends in "go look at those hands"; this is
-where you look. Fifteen largest losses and fifteen largest wins by net big
-blinds, with the board, the exit street, and whatever the opponent showed. A
-pattern here &mdash; stacking off with one pair, folding rivers in the biggest
-pots, the same position over and over &mdash; carries more information than any
-aggregate on this page, because these are the hands the win rate is actually
-made of.</p>
-{drilldown}
+where you look. The largest losses and largest wins by net big blinds, with the
+board, the exit street, and whatever the opponent showed. A pattern here &mdash;
+stacking off with one pair, folding rivers in the biggest pots, the same
+position over and over &mdash; carries more information than any aggregate on
+this page, because these are the hands the win rate is actually made of.</p>
+<div id="r-drilldown">{a['r-drilldown']}</div>
 
 <h2>11. Sessions</h2>
-<p class="note">Each point is one session, split on a gap of more than 30
-minutes. Two or three months of data will tell you your real table limit.</p>
+<p class="note">Each point is one session, split on a gap of more than
+{db.SESSION_GAP_MINUTES} minutes. The boundaries are assigned once when the
+hands are imported and stored on the hand, so "last session" means the same set
+of hands however the report is filtered. This list always covers the whole
+history.</p>
 <div class="card">{charts.session_scatter(sess)}
 <details><summary>Table view</summary>
 <table><thead><tr><th>Start</th><th>Duration</th><th>Hands</th><th>Tables</th>
@@ -882,30 +1257,17 @@ minutes. Two or three months of data will tell you your real table limit.</p>
 <h2>12. Effective stacks</h2>
 <p class="note">A one-off diagnostic. Once the distribution sits at 100bb you can
 retire this chart. Bars below 80bb are the ones to worry about.</p>
-<div class="card">{charts.stack_histogram(stacks)}</div>
+<div id="r-stacks">{a['r-stacks']}</div>
 
 <h2>13. Table load, timing and attention</h2>
-<div class="card">
-<h3>Concurrent tables</h3>
-<table><thead><tr><th>Load</th><th>Hands</th><th>bb/100</th></tr></thead>
-<tbody>{table_rows}</tbody></table>
-<h3>By day of week</h3>
-<table><thead><tr><th>Day</th><th>Hands</th><th>bb/100</th></tr></thead>
-<tbody>{day_rows}</tbody></table>
-<h3>By hour of day</h3>
-<table><thead><tr><th>Hour</th><th>Hands</th><th>bb/100</th></tr></thead>
-<tbody>{hour_rows}</tbody></table>
-<h3>Timeouts</h3>
-<p class="note">{stats.timeouts(conn, hero)} hand(s) where you timed out &mdash;
-a proxy for attention overload.</p>
-</div>
+<div id="r-load">{a['r-load']}</div>
 
 <h2>14. Sample size</h2>
 <p class="note">Frequency stats converge far faster than results because they
 are bounded proportions. This is the argument for building a tracker around
-frequencies and compliance checks rather than around win rate.</p>
-<div class="card"><table><thead><tr><th>Stat</th><th>Hands</th>
-<th>Needed</th><th></th></tr></thead><tbody>{rel_rows}</tbody></table></div>
+frequencies and compliance checks rather than around win rate &mdash; and the
+reason this table recomputes with the filter rather than staying put.</p>
+<div id="r-sample">{a['r-sample']}</div>
 
 {problems_block}
 
@@ -913,6 +1275,7 @@ frequencies and compliance checks rather than around win rate.</p>
 Rake is attributed to players in proportion to contribution, which is an
 estimate: PokerStars reports rake per pot, not per player.</footer>
 </div>
+{payload}
 <script>{JS}{live_js}</script>
 </body></html>"""
 
