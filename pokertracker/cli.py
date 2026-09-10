@@ -109,6 +109,12 @@ def cmd_stats(args) -> int:
         return 1
 
     print(f"\nHero: {hero}   {m['hands']} hands   {m['first_hand']} .. {m['last_hand']}")
+    tourn = stats.excluded_tournaments(conn, hero)
+    if tourn["hands"]:
+        # Said out loud, so the hand count here can be reconciled with the
+        # number of hands sitting in the history folder.
+        print(f"Cash games only: {tourn['hands']} tournament hands "
+              f"({tourn['events']} events) excluded")
     if prior is not None:
         print(f"Period: {period.label}   compared against the "
               f"{prior.hands} hands before it")

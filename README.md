@@ -94,6 +94,11 @@ first.
 All money is stored as **integer cents**. Tournament chip counts are scaled by
 100 too, so one integer type covers both.
 
+**Every figure is a cash-game figure.** Tournament hands are imported and kept,
+but excluded from all of them: a sit-and-go is a different game, and a handful
+of its hands would otherwise sit inside the same bb/100 as thousands of hands of
+micro-stakes cash. The report footer and `stats` say how many were left out.
+
 Every hand is checked against two identities, and any failure is recorded in the
 `problems` table rather than being silently swallowed:
 

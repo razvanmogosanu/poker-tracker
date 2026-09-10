@@ -179,6 +179,26 @@ Note for sanity checks: **AA vs KK preflop is 81.3% with all four suits
 distinct.** The widely quoted 82.4% is a different suit configuration. Test
 expectations here were wrong once; the code was not.
 
+## Cash games only
+
+Tournament hands are parsed and stored like any other -- the histories are the
+source of truth and the parser has to keep up with their line formats -- and
+then excluded from every figure. `stats.CASH_ONLY` is that predicate and it
+rides inside `_win()`, the same funnel as the period filter, so no individual
+stat knows about it. A sit-and-go is a different game: nine hands of one would
+otherwise sit inside the same bb/100 as several thousand hands of $0.01/$0.02,
+and on the real history they moved the headline by 12%.
+
+The exclusion is stated rather than silent -- `stats.excluded_tournaments()`
+feeds a line in `cli stats` and the report footer -- so the hand count can be
+reconciled against the history folder. `hand_index_range()` is the one place
+that cannot use `_win()`: it needs the window predicate inside a CASE and the
+cash filter in the WHERE, because folding them together would count a
+tournament hand as "before the window".
+
+The test is the same shape as the period one: adding tournament hands to a
+database must leave every cash figure exactly where it was.
+
 ## Periods
 
 A period filter is one predicate at the top of the pipeline, not a change to

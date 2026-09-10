@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pokertracker import db, derive, stats  # noqa: E402
+from pokertracker import db, derive, report, stats  # noqa: E402
 from pokertracker.parser import parse_file, parse_money  # noqa: E402
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
 
@@ -649,6 +649,74 @@ class TestPeriodFilters(unittest.TestCase):
         for c in stats.compliance(self.conn, self.HERO):
             if c["kind"] == "count" and c["den"]:
                 self.assertAlmostEqual(c["per100"], 100.0 * c["num"] / c["den"])
+
+
+class TestTournamentsExcluded(unittest.TestCase):
+    """Tournament hands are imported, then ignored by every cash figure.
+
+    The exclusion rides in `_win` alongside the period filter, so the test is
+    the same shape as the period one: adding tournament hands to a database
+    must leave every number over the cash hands exactly where it was.
+    """
+
+    HERO = "Btn"
+    CASH = ("six_handed", "preflop_sequence", "dead_small_blind_post")
+
+    def load_into(self, names):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        for name in names:
+            path = FIXTURES / f"{name}.txt"
+            for hand in parse_file(path):
+                db.insert_hand(conn, hand, str(path))
+        db.assign_sessions(conn)
+        derive.rebuild(conn)
+        return conn
+
+    def snapshot(self, conn):
+        m = stats.money_summary(conn, self.HERO)
+        rates = {r["name"]: (r["num"], r["den"])
+                 for r in stats.preflop_stats(conn, self.HERO)
+                 + stats.postflop_stats(conn, self.HERO)}
+        return {"hands": m["hands"], "net_bb": round(m["net_bb"], 9), "rates": rates,
+                "positions": [(r["position"], r["hands"])
+                              for r in stats.by_position(conn, self.HERO)],
+                "sessions": [(s["hands"], round(s["net_bb"], 9))
+                             for s in stats.sessions(conn, self.HERO)]}
+
+    def test_adding_tournament_hands_changes_nothing(self):
+        before = self.snapshot(self.load_into(self.CASH))
+        after = self.snapshot(self.load_into(self.CASH + ("tournament_ticket",)))
+        self.assertEqual(before, after)
+
+    def test_tournament_hands_are_still_imported(self):
+        conn = self.load_into(self.CASH + ("tournament_ticket",))
+        stored = conn.execute(
+            "SELECT COUNT(*) n FROM hands WHERE is_tournament = 1").fetchone()["n"]
+        self.assertEqual(stored, 1)
+
+    def test_the_exclusion_is_reported_not_silent(self):
+        conn = self.load_into(self.CASH + ("tournament_ticket",))
+        self.assertEqual(stats.excluded_tournaments(conn, self.HERO),
+                         {"hands": 1, "events": 1})
+        self.assertEqual(stats.excluded_tournaments(self.load_into(self.CASH),
+                                                    self.HERO),
+                         {"hands": 0, "events": 0})
+
+    def test_a_tournament_only_database_has_no_cash_figures(self):
+        conn = self.load_into(("tournament_ticket",))
+        self.assertEqual(stats.money_summary(conn, self.HERO), {"hands": 0})
+        self.assertEqual(stats.sessions(conn, self.HERO), [])
+        # And the report says so rather than rendering a page of zeroes.
+        self.assertIn("No hands imported", report.build(conn, self.HERO))
+
+    def test_the_stakes_header_ignores_a_tournament_played_last(self):
+        # The tournament fixture is the most recent hand by played_at; the
+        # header must still describe the cash game.
+        conn = self.load_into(self.CASH + ("tournament_ticket",))
+        html = report.build(conn, self.HERO)
+        self.assertNotIn("$20.00/$40.00", html)
 
 
 class TestReportPeriods(unittest.TestCase):

@@ -94,8 +94,21 @@ class Window:
         return self.hands == 0
 
 
+# Tournament hands are parsed and stored -- the histories are the source of
+# truth and the parser has to keep up with their line formats -- but they are
+# not cash hands and every figure in this report is a cash figure. Chip EV,
+# stack depths and open ranges all mean something different when there is a
+# bubble, so nine hands of a sit-and-go would otherwise sit inside the same
+# bb/100 as several thousand hands of $0.01/$0.02. The exclusion rides in the
+# same funnel as the period filter, so no individual stat has to know about it.
+CASH_ONLY = "h.is_tournament = 0"
+
+
 def _win(window: Window | None) -> tuple[str, tuple]:
-    return ("1=1", ()) if window is None else (window.sql, window.params)
+    """The WHERE fragment for a window: cash hands, narrowed to the period."""
+    if window is None:
+        return (CASH_ONLY, ())
+    return (f"{CASH_ONLY} AND ({window.sql})", window.params)
 
 
 @dataclass(frozen=True)
@@ -133,7 +146,8 @@ def periods(conn: sqlite3.Connection, hero: str,
     rows = conn.execute(
         """SELECT h.hand_id, h.played_at, h.session_id
            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
-           ORDER BY h.played_at, h.hand_id""",
+           WHERE {CASH_ONLY}
+           ORDER BY h.played_at, h.hand_id""".format(CASH_ONLY=CASH_ONLY),
         (hero,),
     ).fetchall()
     total = len(rows)
@@ -185,6 +199,22 @@ def periods(conn: sqlite3.Connection, hero: str,
     return out
 
 
+def excluded_tournaments(conn: sqlite3.Connection, hero: str) -> dict:
+    """Hero's tournament hands, which no other figure in this module counts.
+
+    Reported rather than silently dropped: a reader who played a sit-and-go
+    last night should be told why those hands are missing instead of counting
+    the report's hands and finding it short.
+    """
+    row = conn.execute(
+        """SELECT COUNT(*) hands, COUNT(DISTINCT h.tournament_id) events
+           FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+           WHERE h.is_tournament = 1""",
+        (hero,),
+    ).fetchone()
+    return {"hands": row["hands"], "events": row["events"]}
+
+
 def hand_index_range(conn: sqlite3.Connection, hero: str,
                      window: Window | None) -> tuple[int, int] | None:
     """Where a window sits in the hero's chronological hand sequence.
@@ -194,12 +224,13 @@ def hand_index_range(conn: sqlite3.Connection, hero: str,
     its position: a period seen in isolation loses the context that makes the
     chart worth looking at.
     """
-    sql, params = _win(window)
+    sql, params = ("1=1", ()) if window is None else (window.sql, window.params)
     row = conn.execute(
         f"""SELECT COUNT(*) n,
                    SUM(CASE WHEN {sql} THEN 1 ELSE 0 END) sel,
                    SUM(CASE WHEN {sql} THEN 0 ELSE 1 END) before
-            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?""",
+            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+            WHERE {CASH_ONLY}""",
         (*params, *params, hero),
     ).fetchone()
     if not row["n"] or not row["sel"]:
