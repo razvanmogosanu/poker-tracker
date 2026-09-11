@@ -8,6 +8,7 @@ posted as "small & big blinds", and a dead small blind posted on its own).
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import unittest
@@ -15,7 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pokertracker import db, derive, report, stats  # noqa: E402
+from pokertracker import db, derive, handclass, report, stats  # noqa: E402
+from pokertracker.cards import parse_cards  # noqa: E402
 from pokertracker.parser import parse_file, parse_money  # noqa: E402
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
 
@@ -445,6 +447,442 @@ class TestBigPots(unittest.TestCase):
         self.conn.rollback()
 
 
+class TestHandClassification(unittest.TestCase):
+    """The eight buckets, and the one rule that makes them worth having.
+
+    A board of K K 7 7 2 gives everyone two pair. The player holding A5 has ace
+    high, and the whole point of this classifier is that it says so -- a hand
+    the board makes on its own is not your hand. Most of the cases below are
+    ones where the evaluator's category and the player's actual holding differ.
+    """
+
+    def klass(self, hole: str, board: str):
+        return handclass.classify(parse_cards(hole), parse_cards(board))
+
+    def test_the_boards_own_two_pair_is_not_your_two_pair(self):
+        # The hand that started all of this: ace high in a 200bb pot.
+        self.assertEqual(self.klass("Ac 5h", "Kh Kd 7s 7c 2d"), handclass.NO_PAIR)
+
+    def test_the_boards_own_trips_is_not_your_trips(self):
+        self.assertEqual(self.klass("Ac Qh", "2h 2d 2s Kc 5d"), handclass.NO_PAIR)
+        # ...but pairing the board's kicker card is a genuine full house.
+        self.assertEqual(self.klass("Kc Qh", "2h 2d 2s Kd 5d"),
+                         handclass.STRAIGHT_PLUS)
+
+    def test_playing_the_boards_straight_is_not_making_one(self):
+        self.assertEqual(self.klass("2c 3h", "5h 6d 7s 8c 9d"), handclass.NO_PAIR)
+        # One card better than the board, and it is your straight.
+        self.assertEqual(self.klass("Tc 3h", "5h 6d 7s 8c 9d"),
+                         handclass.STRAIGHT_PLUS)
+
+    def test_top_pair_means_the_top_card_of_the_board(self):
+        self.assertEqual(self.klass("Kc 5h", "Kh 7d 2s"), handclass.TOP_PAIR)
+        self.assertEqual(self.klass("7c 5h", "Kh 7d 2s"), handclass.WEAK_PAIR)
+
+    def test_an_overcard_on_a_later_street_demotes_top_pair(self):
+        # Top pair on the flop is second pair once an ace turns, and the bucket
+        # has to say the second thing, because that is the hand being played.
+        self.assertEqual(self.klass("Kh 4s", "Kc 3h 3s"), handclass.TOP_PAIR)
+        self.assertEqual(self.klass("Kh 4s", "Kc 3h 3s As 7c"), handclass.WEAK_PAIR)
+
+    def test_pocket_pairs_split_at_the_top_board_card(self):
+        self.assertEqual(self.klass("Jc Jh", "9h 7d 2s"), handclass.OVERPAIR)
+        self.assertEqual(self.klass("Jc Jh", "Kh 7d 2s"), handclass.WEAK_PAIR)
+        self.assertEqual(self.klass("Jc Jh", "Jd 7d 2s"), handclass.TRIPS)
+
+    def test_trips_on_a_paired_board_and_two_pair_with_both_cards(self):
+        self.assertEqual(self.klass("Kc Jh", "Kh Kd 2s"), handclass.TRIPS)
+        self.assertEqual(self.klass("Ac Kh", "Ah Kd 2s"), handclass.TWO_PAIR)
+
+    def test_nothing_to_classify_yields_nothing(self):
+        self.assertIsNone(handclass.classify(parse_cards("Ac Kh"), []))
+        self.assertIsNone(handclass.classify(None, parse_cards("Ah Kd 2s")))
+
+    def test_the_buckets_are_ordered_weakest_first(self):
+        self.assertEqual(handclass.CLASSES[0], handclass.NO_PAIR)
+        # A draw is worth more than nothing and less than a pair.
+        self.assertEqual(handclass.CLASSES[1], handclass.NO_PAIR_DRAW)
+        self.assertEqual(handclass.CLASSES[2], handclass.WEAK_PAIR)
+        self.assertEqual(handclass.CLASSES[-1], handclass.STRAIGHT_PLUS)
+        self.assertEqual(sorted(handclass.CLASSES, key=handclass.RANK.get),
+                         list(handclass.CLASSES))
+        self.assertEqual(set(handclass.LONG_NAME), set(handclass.CLASSES))
+
+    def test_a_draw_is_eight_outs_and_a_gutshot_is_not(self):
+        """The day-one rule, which is the whole reason the split exists."""
+        self.assertEqual(self.klass("Ah Kh", "7h 2h 9c"), handclass.NO_PAIR_DRAW)
+        self.assertEqual(self.klass("9s 8s", "7d 6c 2h"), handclass.NO_PAIR_DRAW)
+        # Four outs, and the rule says that is not a hand to put money in with.
+        self.assertEqual(self.klass("9s 8s", "7d 5c 2h"), handclass.NO_PAIR)
+        self.assertEqual(self.klass("Ac 5h", "Kh Kd 7s"), handclass.NO_PAIR)
+
+    def test_the_outs_count_is_the_one_a_player_would_do_in_their_head(self):
+        outs = lambda h, b: handclass.count_outs(parse_cards(h), parse_cards(b))
+        self.assertEqual(outs("Ah Kh", "7h 2h 9c"), 9)      # flush draw
+        self.assertEqual(outs("9s 8s", "7d 6c 2h"), 8)      # open-ender
+        self.assertEqual(outs("9s 8s", "7d 5c 2h"), 4)      # gutshot
+        # Nine hearts plus the three tens that are not already one of them.
+        self.assertEqual(outs("Ah Kh", "Qh Jh 2c"), 12)
+        # Two cards away is not a draw; a backdoor gets no credit.
+        self.assertEqual(outs("Ah 2h", "Kh 7d 9c"), 0)
+
+    def test_a_draw_the_board_owns_is_not_your_draw(self):
+        """The same rule as the made buckets, one card earlier.
+
+        On a four-flush turn the fifth heart makes a flush that every player at
+        the table has, so it is not an out. Holding one heart yourself makes it
+        nine again.
+        """
+        self.assertEqual(handclass.count_outs(parse_cards("2c 3d"),
+                                              parse_cards("Kh Qh Jh 9h")), 0)
+        self.assertEqual(self.klass("2c 3d", "Kh Qh Jh 9h"), handclass.NO_PAIR)
+        self.assertEqual(self.klass("2h 3d", "Kh Qh Jh 9h"),
+                         handclass.STRAIGHT_PLUS)
+
+    def test_a_complete_board_leaves_nothing_to_draw_to(self):
+        """A busted draw is naked at the moment it pays off a river bet.
+
+        The bucket is measured where the player left the hand, and by the river
+        there is no card left to come, so the money that went in there went in
+        with nothing -- which is the thing the split exists to say.
+        """
+        self.assertEqual(handclass.count_outs(parse_cards("Ah Kh"),
+                                              parse_cards("7h 2h 9c 3d 4s")), 0)
+        self.assertEqual(self.klass("Ah Kh", "7h 2h 9c 3d 4s"), handclass.NO_PAIR)
+        # Still drawing on the turn, so still counted as drawing there.
+        self.assertEqual(self.klass("Ah Kh", "7h 2h 9c 3d"), handclass.NO_PAIR_DRAW)
+
+    def test_the_draw_split_only_moves_hands_out_of_no_pair(self):
+        """Something already worth money keeps its bucket, draw or not."""
+        # A flopped flush draw that also pairs the top card is top pair.
+        self.assertEqual(self.klass("Kh 7h", "Kc 2h 9h"), handclass.TOP_PAIR)
+        self.assertEqual(self.klass("Jh Th", "9h 8c 2h"), handclass.NO_PAIR_DRAW)
+
+    def test_batching_by_board_length_does_not_change_an_answer(self):
+        cases = [("Ac 5h", "Kh Kd 7s 7c 2d"), ("Kc 5h", "Kh 7d 2s"),
+                 ("Jc Jh", "9h 7d 2s Ts"), ("Tc 3h", "5h 6d 7s 8c 9d"),
+                 ("Ah Kh", "7h 2h 9c"), ("9s 8s", "7d 6c 2h Ah")]
+        pairs = [(parse_cards(h), parse_cards(b)) for h, b in cases]
+        self.assertEqual(handclass.classify_many(pairs),
+                         [self.klass(h, b) for h, b in cases])
+
+
+class TestHandClassInTheDatabase(unittest.TestCase):
+    """The stored bucket, and the street it is measured on."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = sqlite3.connect(":memory:")
+        cls.conn.row_factory = sqlite3.Row
+        cls.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(cls.conn, hand, str(path))
+        derive.rebuild(cls.conn)
+
+    def klass(self, player: str, hand_no: str):
+        row = self.conn.execute(
+            """SELECT hp.hand_class FROM hand_player hp
+               JOIN hands h ON h.hand_id = hp.hand_id
+               WHERE h.site_hand_no = ? AND hp.player = ?""",
+            (hand_no, player)).fetchone()
+        self.assertIsNotNone(row, f"{player} is not in {hand_no}")
+        return row["hand_class"]
+
+    def test_postflop_invested_counts_only_money_added_after_the_flop(self):
+        """Blinds are preflop, so nothing has to exclude them by name."""
+        rows = self.conn.execute(
+            """SELECT hp.hand_id, hp.player, hp.postflop_invested, hp.saw_flop
+               FROM hand_player hp""").fetchall()
+        self.assertTrue(rows)
+        for r in rows:
+            if not r["saw_flop"]:
+                # You cannot put money in on a street you never reached.
+                self.assertEqual(r["postflop_invested"], 0,
+                                 f'{r["player"]} in {r["hand_id"]}')
+            want = self.conn.execute(
+                """SELECT COALESCE(SUM(amount), 0) v FROM actions
+                   WHERE hand_id = ? AND player = ?
+                     AND street IN ('flop','turn','river')""",
+                (r["hand_id"], r["player"])).fetchone()["v"]
+            self.assertEqual(r["postflop_invested"], want,
+                             f'{r["player"]} in {r["hand_id"]}')
+
+    def test_the_street_columns_sum_back_to_the_postflop_total(self):
+        bad = self.conn.execute(
+            """SELECT COUNT(*) n FROM hand_player
+               WHERE invested_flop + invested_turn + invested_river
+                     != postflop_invested""").fetchone()["n"]
+        self.assertEqual(bad, 0)
+
+    def test_each_street_column_matches_that_streets_actions(self):
+        for street in ("flop", "turn", "river"):
+            rows = self.conn.execute(
+                f"""SELECT hp.hand_id, hp.player, hp.invested_{street} v
+                    FROM hand_player hp""").fetchall()
+            for r in rows:
+                want = self.conn.execute(
+                    """SELECT COALESCE(SUM(amount), 0) v FROM actions
+                       WHERE hand_id = ? AND player = ? AND street = ?""",
+                    (r["hand_id"], r["player"], street)).fetchone()["v"]
+                self.assertEqual(r["v"], want,
+                                 f'{r["player"]} in {r["hand_id"]} on {street}')
+
+    def test_postflop_invested_never_exceeds_what_was_contributed(self):
+        bad = self.conn.execute(
+            """SELECT COUNT(*) n FROM hand_player hp
+               JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+               WHERE hp.postflop_invested > r.contributed""").fetchone()["n"]
+        self.assertEqual(bad, 0)
+
+    def test_a_showdown_hand_is_classified(self):
+        # Ah Kh and 5d 5c on 2c 7d 9s Kc 4h.
+        self.assertEqual(self.klass("Utg", "900000006"), handclass.TOP_PAIR)
+        self.assertEqual(self.klass("Returner", "900000006"), handclass.WEAK_PAIR)
+
+    def test_an_unshown_hand_has_no_bucket(self):
+        # Nobody can classify cards that were never turned over.
+        self.assertIsNone(self.klass("Big", "900000002"))
+
+    def test_a_preflop_fold_has_no_bucket(self):
+        self.assertIsNone(self.klass("Small", "900000002"))
+
+    def test_the_bucket_is_measured_at_the_street_the_player_left_on(self):
+        """A flop fold is judged on the flop, not on a river nobody saw.
+
+        The board runs out in a multiway pot whether or not you are still in
+        it. Scoring the fold against five cards would credit a player for a
+        card that had not been dealt when the decision was made, so this hand
+        is given a turn and a river that improve a folded holding to trips and
+        the bucket must not move.
+        """
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(conn, hand, str(path))
+        row = conn.execute(
+            "SELECT hand_id FROM hands WHERE site_hand_no = '900000002'").fetchone()
+        # "Big" folds to the flop bet in this hand. Give them cards, and run the
+        # board out into a king-high board that would make those cards trips.
+        conn.execute("UPDATE seats SET hole_cards = 'Ac Kc' "
+                     "WHERE hand_id = ? AND player = 'Big'", (row["hand_id"],))
+        conn.execute("UPDATE hands SET board_turn = 'Ks', board_river = 'Kd' "
+                     "WHERE hand_id = ?", (row["hand_id"],))
+        derive.rebuild(conn)
+
+        flags = conn.execute(
+            "SELECT hand_class, saw_flop, saw_turn FROM hand_player"
+            " WHERE hand_id = ? AND player = 'Big'", (row["hand_id"],)).fetchone()
+        self.assertEqual((flags["saw_flop"], flags["saw_turn"]), (1, 0))
+        self.assertEqual(flags["hand_class"], handclass.NO_PAIR)
+        # The rule has teeth only because the full board says something else.
+        self.assertEqual(
+            handclass.classify(parse_cards("Ac Kc"), parse_cards("2c 7d 9s Ks Kd")),
+            handclass.TRIPS)
+
+    def test_the_summary_covers_every_bucket_in_strength_order(self):
+        rows = stats.hand_classes(self.conn, "Utg")
+        self.assertEqual([r["class"] for r in rows], list(handclass.CLASSES))
+        self.assertTrue(all(r["label"] for r in rows))
+
+    def test_the_summary_partitions_the_classified_hands(self):
+        """Every classified hand lands in exactly one bucket, money included."""
+        for hero in ("Utg", "Btn", "Insurer"):
+            rows = stats.hand_classes(self.conn, hero)
+            total = self.conn.execute(
+                """SELECT COUNT(*) n, SUM(r.net * 1.0 / h.bb) net
+                   FROM hand_player hp
+                   JOIN hands h   ON h.hand_id = hp.hand_id
+                   JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+                   WHERE hp.player = ? AND hp.hand_class IS NOT NULL
+                     AND h.is_tournament = 0""", (hero,)).fetchone()
+            self.assertEqual(sum(r["hands"] for r in rows), total["n"], hero)
+            self.assertAlmostEqual(sum(r["net_bb"] for r in rows),
+                                   total["net"] or 0.0, places=6, msg=hero)
+
+    def test_a_pot_threshold_only_ever_removes_hands(self):
+        loose = stats.hand_classes(self.conn, "Insurer", 0.0)
+        tight = stats.hand_classes(self.conn, "Insurer", 120.0)
+        for a, b in zip(loose, tight):
+            self.assertLessEqual(b["hands"], a["hands"], a["class"])
+        self.assertLess(sum(r["hands"] for r in tight),
+                        sum(r["hands"] for r in loose))
+
+    def test_the_three_pot_ranges_tile_the_flopped_hands(self):
+        """0-15, 15-40 and 40+ partition every classified hand and its money.
+
+        The middle column exists because 40bb is a high bar -- it is only
+        worth reading if it is a real slice of the same total rather than a
+        third overlapping view of it.
+        """
+        for hero in ("Utg", "Btn", "Insurer"):
+            whole = stats.hand_classes(self.conn, hero)
+            parts = [stats.hand_classes(self.conn, hero, 0.0, None, stats.MID_POT_BB),
+                     stats.hand_classes(self.conn, hero, stats.MID_POT_BB, None,
+                                        stats.BIG_POT_BB),
+                     stats.hand_classes(self.conn, hero, stats.BIG_POT_BB)]
+            for i, r in enumerate(whole):
+                self.assertEqual(sum(p[i]["hands"] for p in parts), r["hands"],
+                                 f"{hero} {r['class']}")
+                self.assertAlmostEqual(sum(p[i]["net_bb"] for p in parts),
+                                       r["net_bb"], places=6)
+                self.assertAlmostEqual(sum(p[i]["invested_bb"] for p in parts),
+                                       r["invested_bb"], places=6)
+
+    def test_invested_bb_separates_a_cheap_fold_from_a_paid_off_hand(self):
+        """The net alone cannot say how the money left; bb in can."""
+        rows = stats.hand_classes(self.conn, "Utg")
+        played = [r for r in rows if r["hands"]]
+        self.assertTrue(played)
+        for r in played:
+            # You cannot lose more than you put in, and you cannot put in a
+            # negative amount, so the net is bounded below by minus the stake.
+            self.assertGreater(r["invested_bb"], 0.0, r["class"])
+            self.assertGreaterEqual(r["net_bb"], -r["invested_bb"] - 1e-9, r["class"])
+            self.assertAlmostEqual(r["bb_in_hand"], r["invested_bb"] / r["hands"],
+                                   places=9)
+
+    def test_bb_per_hand_is_blank_rather_than_zero_for_an_empty_bucket(self):
+        rows = stats.hand_classes(self.conn, "Utg", 10_000.0)
+        self.assertTrue(all(r["hands"] == 0 for r in rows))
+        self.assertTrue(all(r["bb_hand"] is None for r in rows))
+        self.assertTrue(all(r["bb_in_hand"] is None for r in rows))
+        self.assertIsNone(stats.worst_class(rows))
+
+    def test_the_worst_bucket_is_the_one_that_cost_the_most(self):
+        rows = [{"class": handclass.NO_PAIR, "hands": 3, "net_bb": -174.0},
+                {"class": handclass.TOP_PAIR, "hands": 9, "net_bb": -20.0},
+                {"class": handclass.TRIPS, "hands": 2, "net_bb": 88.0},
+                {"class": handclass.OVERPAIR, "hands": 0, "net_bb": 0.0}]
+        self.assertEqual(stats.worst_class(rows)["class"], handclass.NO_PAIR)
+
+    def test_the_eight_outs_check_counts_only_hands_that_paid_to_find_out(self):
+        """A naked ace-high that was checked down broke no rule and cost nothing.
+
+        The rule is about money going in, so the denominator is the no-pair
+        hands with postflop money in it, not every no-pair hand. Including the
+        free ones would dilute the only figure the check exists to report.
+        """
+        check = next(c for c in stats.compliance(self.conn, "Utg")
+                     if str(handclass.DRAW_OUTS) in c["name"])
+        want = self.conn.execute(
+            """SELECT
+                 SUM(CASE WHEN hand_class = ? THEN 1 ELSE 0 END) naked,
+                 SUM(CASE WHEN hand_class IN (?, ?) THEN 1 ELSE 0 END) both
+               FROM hand_player
+               WHERE player = 'Utg' AND postflop_invested > 0""",
+            (handclass.NO_PAIR, handclass.NO_PAIR, handclass.NO_PAIR_DRAW),
+        ).fetchone()
+        self.assertEqual(check["num"], want["naked"] or 0)
+        self.assertEqual(check["den"], want["both"] or 0)
+        # No band was invented for "rare", so a populated window watches rather
+        # than passing or failing; a thin one still says so.
+        self.assertIn(check["status"], ("watch", "thin"))
+
+    def test_the_street_split_adds_back_to_the_row_it_breaks_down(self):
+        """The whole reason preflop is a row: the column has to reconcile.
+
+        A breakdown that does not sum to the figure above it reads as a bug,
+        and the reader has no way to tell which of the two numbers to believe.
+        """
+        for lo, hi in ((0.0, None), (stats.MID_POT_BB, stats.BIG_POT_BB),
+                       (stats.BIG_POT_BB, None)):
+            rows = stats.hand_classes(self.conn, "Utg", lo, None, hi)
+            row = next(r for r in rows if r["class"] == handclass.NO_PAIR)
+            split = stats.class_street_split(
+                self.conn, "Utg", handclass.NO_PAIR, lo, None, hi)
+            self.assertTrue(all(r["hands"] == row["hands"] for r in split))
+            if not row["hands"]:
+                continue
+            self.assertAlmostEqual(sum(r["bb_in"] for r in split),
+                                   row["invested_bb"], places=6)
+            self.assertAlmostEqual(sum(r["bb_in_hand"] for r in split),
+                                   row["bb_in_hand"], places=6)
+            self.assertAlmostEqual(sum(r["share"] for r in split), 1.0, places=6)
+
+    def test_an_empty_bucket_yields_no_shares_rather_than_zeroes(self):
+        split = stats.class_street_split(
+            self.conn, "Utg", handclass.NO_PAIR, 10_000.0)
+        self.assertEqual([r["street"] for r in split],
+                         list(stats.INVESTED_STREETS))
+        self.assertTrue(all(r["hands"] == 0 for r in split))
+        self.assertTrue(all(r["share"] is None for r in split))
+        self.assertTrue(all(r["bb_in_hand"] is None for r in split))
+        self.assertIsNone(stats.dominant_street(split))
+
+    def test_a_street_has_to_hold_a_majority_to_be_named(self):
+        def split(pf, f, t, rv):
+            return [{"street": s, "bb_in": v, "share": 0.0}
+                    for s, v in zip(stats.INVESTED_STREETS, (pf, f, t, rv))]
+        # A plurality is not a majority, and crowning one would invent a
+        # diagnosis the split does not support.
+        self.assertIsNone(stats.dominant_street(split(0, 40, 35, 25)))
+        self.assertEqual(
+            stats.dominant_street(split(0, 10, 10, 80))["street"], "river")
+        # Preflop is context, not an answer: it cannot win this even when it
+        # is most of the money, which in a mostly-folded bucket it always is.
+        self.assertIsNone(stats.dominant_street(split(900, 40, 35, 25)))
+        self.assertEqual(
+            stats.dominant_street(split(900, 10, 10, 80))["street"], "river")
+
+    def test_the_report_card_holds_the_whole_table_open(self):
+        # Every bucket keeps its row even when empty, so the shape of the table
+        # does not change with the filter and the eye can read down a column.
+        html = report._handclass_card(self.conn, "Utg", None)
+        for name in handclass.LONG_NAME.values():
+            self.assertIn(name, html, name)
+        self.assertIn(f"{stats.BIG_POT_BB:.0f}bb", html)
+        # The middle range is on the page too, and every range carries bb in.
+        self.assertIn(f"{stats.MID_POT_BB:.0f}-{stats.BIG_POT_BB:.0f}bb", html)
+        self.assertEqual(html.count("<th>bb in</th>"), 3)
+        # Utg never reaches a flop with no pair, so the street breakdown has
+        # nothing to break down and is left out rather than rendered empty.
+        self.assertNotIn("<th>share</th>", html)
+
+    def test_the_street_breakdown_appears_for_a_hero_that_has_the_bucket(self):
+        html = report._handclass_card(self.conn, "Button", None)
+        for street in stats.INVESTED_STREETS:
+            self.assertIn(f"<td>{street}</td>", html, street)
+        self.assertEqual(html.count("<th>share</th>"), 3)
+    def test_the_preflop_cell_is_weighted_by_its_own_size(self):
+        """Dimming is a claim about the number, so it has to read the number.
+
+        One open is the cost of arriving and belongs in the background; a
+        3-bet pot built with a hand that flopped nothing is the loudest figure
+        in the row, and fixed dimming hid exactly that.
+        """
+        self.assertEqual(report._preflop_weight("preflop", 4.4), " context")
+        self.assertEqual(report._preflop_weight("preflop", 15.2), " chosen")
+        # Between the two it is neither: a single raised pot is not a finding.
+        self.assertEqual(report._preflop_weight("preflop", 6.6), "")
+        # The boundaries belong to the band they name.
+        self.assertEqual(
+            report._preflop_weight("preflop", report.PREFLOP_ARRIVING_BB), "")
+        self.assertEqual(
+            report._preflop_weight("preflop", report.PREFLOP_CHOSEN_BB), " chosen")
+        # Every other street is a decision at any size, and an empty bucket
+        # has no size to read.
+        self.assertEqual(report._preflop_weight("river", 15.2), "")
+        self.assertEqual(report._preflop_weight("preflop", None), "")
+
+    def test_the_preflop_cell_is_loud_in_big_pots_and_quiet_in_small_ones(self):
+        html = report._handclass_card(self.conn, "Button", None)
+        row = re.search(r"<tr><td>preflop</td>.*?</tr>", html).group(0)
+        self.assertTrue("context" in row or "chosen" in row, row)
+        # Whatever the weight, it is on the cells and not on the row, so the
+        # three pot ranges can disagree about the same street.
+        self.assertNotIn('<tr class=', row)
+
+    def test_the_drill_down_carries_the_bucket(self):
+        rows = stats.big_pots(self.conn, "Utg", 50)
+        row = next(r for r in rows["losses"] + rows["wins"]
+                   if r["site_hand_no"] == "900000006")
+        self.assertEqual(row["hand_class"], handclass.TOP_PAIR)
+
+
 class TestStreetFunnel(unittest.TestCase):
     """The funnel's bars are cumulative; the money on them is not.
 
@@ -822,6 +1260,46 @@ class TestReportPeriods(unittest.TestCase):
                 continue
             self.assertNotIn("Win rate", regions["r-tiles"], key)
             self.assertIn("Win rate is not shown", regions["r-banner"], key)
+
+    def test_every_period_carries_the_made_hand_section(self):
+        # The section is rendered per period like everything else: there is no
+        # server behind a file:// page to recompute it on selection. This hero
+        # folds preflop in every fixture, so what travels is the empty state --
+        # which still has to travel, or the region would vanish on selection.
+        for key, regions in self.payload["regions"].items():
+            html = regions["r-handclass"]
+            self.assertTrue(html.startswith('<div class="card">'), key)
+            if "Made hand" in html:
+                for name in handclass.LONG_NAME.values():
+                    self.assertIn(name, html, f"{key}: {name}")
+            else:
+                self.assertIn("No hands have reached a flop", html, key)
+
+    def test_a_thin_bucket_states_the_money_but_not_a_diagnosis(self):
+        """A realized loss is a fact; "this is your leak" is an inference."""
+        from pokertracker import report
+
+        def rows(hands):
+            return [{"class": handclass.NO_PAIR, "label": "no pair",
+                     "hands": hands, "net_bb": -66.0, "bb_hand": -66.0 / hands}]
+
+        thin = report._handclass_banner(rows(1))
+        fat = report._handclass_banner(rows(stats.MIN_CLASS_HANDS))
+        # Both name the money. Only one of them draws a conclusion from it.
+        self.assertIn("-66 bb", thin)
+        self.assertIn("-66 bb", fat)
+        self.assertIn("costing you the most", fat)
+        self.assertNotIn("costing you the most", thin)
+        self.assertIn("rather than as a pattern", thin)
+
+    def test_a_bucket_that_lost_nothing_gets_no_verdict_at_all(self):
+        from pokertracker import report
+
+        winners = [{"class": handclass.TOP_PAIR, "label": "top pair",
+                    "hands": 9, "net_bb": 40.0, "bb_hand": 4.4}]
+        self.assertIn("No made-hand bucket is losing money",
+                      report._handclass_banner(winners))
+        self.assertEqual(report._handclass_banner([]), "")
 
     def test_filtered_tables_carry_a_prior_column(self):
         for key, regions in self.payload["regions"].items():

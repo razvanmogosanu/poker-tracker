@@ -11,6 +11,7 @@ import math
 import sqlite3
 from dataclasses import dataclass
 
+from . import handclass
 from .positions import POSITION_ORDER, sort_key
 
 # Standard deviation for 6-max NLHE is roughly 85-100 bb/100. Used only as a
@@ -517,6 +518,38 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
                 "value": pct, "per100": None, "target": target,
                 "status": status, "note": note}
 
+    # The 8-outs rule, which until the no-pair bucket was split had no
+    # denominator anywhere and so could not be checked at all. The denominator
+    # is the hands where money actually went in postflop with no pair: a naked
+    # ace-high that was checked down cost nothing and broke no rule, and
+    # counting it would dilute the only number here that matters. There is no
+    # band, so the status is "watch" -- the rule says naked continues should be
+    # rare, not that they should be zero, and inventing a percentage for "rare"
+    # would dress a guess up as a standard. The note carries the money instead,
+    # which is the part that argues.
+    draw = conn.execute(
+        f"""SELECT hp.hand_class k, COUNT(*) n, SUM(r.net * 1.0 / h.bb) net
+           FROM hand_player hp
+           JOIN hands h   ON h.hand_id = hp.hand_id
+           JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+           WHERE hp.player = ? AND hp.postflop_invested > 0
+             AND hp.hand_class IN (?, ?) AND {wsql}
+           GROUP BY hp.hand_class""",
+        (hero, handclass.NO_PAIR, handclass.NO_PAIR_DRAW, *wp),
+    ).fetchall()
+    by_k = {r["k"]: r for r in draw}
+    naked = by_k.get(handclass.NO_PAIR)
+    drawing = by_k.get(handclass.NO_PAIR_DRAW)
+    naked_n = naked["n"] if naked else 0
+    draw_n = drawing["n"] if drawing else 0
+    naked_note = (
+        f"{naked_n} of them cost {naked['net'] or 0.0:+,.0f} bb; the "
+        f"{draw_n} with {handclass.DRAW_OUTS}+ outs, "
+        f"{(drawing['net'] if drawing else 0.0) or 0.0:+,.0f} bb."
+        if naked_n or draw_n else
+        "No postflop money has gone in with no pair yet."
+    )
+
     return [
         count_check("SB cold calls", row["sb_cc"], "0",
                     "Any non-zero value is a deviation from a raise-or-fold SB."),
@@ -524,6 +557,8 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
                     "Completing the small blind is VPIP but not PFR."),
         rate_check("BTN open when folded to", row["btn_open"], row["btn_open_opp"],
                    "~45%", 38, 52, "Opens divided by opportunities on the button."),
+        rate_check(f"Postflop money in below {handclass.DRAW_OUTS} outs",
+                   naked_n, naked_n + draw_n, "low", None, None, naked_note),
         rate_check("Hands below 80bb effective", row["short"], n, "low", None, None,
                    f"Mean effective stack {row['avg_eff']:.1f}bb."
                    if row["avg_eff"] is not None else ""),
@@ -666,6 +701,184 @@ def pot_buckets(conn, hero, window: Window | None = None) -> list[dict]:
         out.append({"label": label, "hands": r["n"], "net_bb": r["net"] or 0.0,
                     "bb100": 100 * (r["net"] or 0) / r["n"] if r["n"] else None})
     return out
+
+
+# The pot size above which a made-hand bucket is worth reading on its own.
+# Below it the buckets are dominated by hands that cost a big blind and tell
+# you nothing; at 40bb and up every row is a stack-off decision. It matches the
+# fourth edge in pot_buckets() deliberately, so the two sections can be read
+# against each other.
+BIG_POT_BB = 40.0
+
+# The floor of the middle range, and the third edge in pot_buckets() for the
+# same reason. 40bb is a high bar -- on a small history only a handful of pots
+# clear it -- so the big-pot column on its own cannot say whether a losing
+# bucket bleeds through the medium pots too or genuinely stops at the small
+# ones. The 15-40bb range is where that question is answered: the pots are big
+# enough that the hands were played rather than folded to a continuation bet,
+# and numerous enough to carry a count.
+MID_POT_BB = 15.0
+
+
+def hand_classes(conn, hero, min_pot_bb: float = 0.0,
+                 window: Window | None = None,
+                 max_pot_bb: float | None = None) -> list[dict]:
+    """Net winnings grouped by what the hero's hand actually was.
+
+    The aggregate that says "you are losing in big pots" does not say what you
+    were holding in them, and that is the part a review needs: three stacks lost
+    with no pair is a different leak from three stacks lost with an overpair,
+    and only one of them is fixed by folding more.
+
+    Buckets are derived at ingest (see `derive._classify_rows`) from the board
+    as of the street the hero left the hand on, so this is a plain grouping.
+    Every bucket is returned even when empty, in strength order, so the shape of
+    the table does not change with the filter.
+    """
+    wsql, wp = _win(window)
+    # An open-ended range keeps the upper bound out of the way rather than
+    # branching the SQL; the comparison is exclusive at the top so the ranges
+    # tile the way pot_buckets() does and a pot at exactly 40bb is counted once.
+    hi = float("inf") if max_pot_bb is None else max_pot_bb
+    rows = {r["k"]: r for r in conn.execute(
+        f"""SELECT hp.hand_class k, COUNT(*) n,
+                   SUM(r.net * 1.0 / h.bb) net,
+                   SUM(r.contributed * 1.0 / h.bb) invested,
+                   SUM(hp.wtsd) showdowns
+            FROM hand_player hp
+            JOIN hands h   ON h.hand_id = hp.hand_id
+            JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+            WHERE hp.player = ? AND hp.hand_class IS NOT NULL
+              AND h.total_pot * 1.0 / h.bb >= ?
+              AND h.total_pot * 1.0 / h.bb < ? AND {wsql}
+            GROUP BY hp.hand_class""",
+        (hero, min_pot_bb, hi, *wp),
+    )}
+    out = []
+    for name in handclass.CLASSES:
+        r = rows.get(name)
+        n = r["n"] if r else 0
+        net = (r["net"] or 0.0) if r else 0.0
+        # What the bucket cost says nothing about how it was lost. A no-pair
+        # hand at -9 bb is a flop float given up on the turn or a river call
+        # that should never have happened, and those are opposite mistakes:
+        # the first one is folding too late, the second is not folding at all.
+        # Invested bb per hand separates them, so it travels beside the net
+        # everywhere the net is shown.
+        invested = (r["invested"] or 0.0) if r else 0.0
+        out.append({
+            "class": name,
+            "label": handclass.LONG_NAME[name],
+            "hands": n,
+            "net_bb": net,
+            "bb_hand": net / n if n else None,
+            "invested_bb": invested,
+            "bb_in_hand": invested / n if n else None,
+            "showdowns": (r["showdowns"] or 0) if r else 0,
+        })
+    return out
+
+
+# The streets a row of the split is reported on. Preflop is one of them even
+# though no decision in this section is about it: the made-hand table's `bb in`
+# is total contribution, so without a preflop row the four figures would not
+# add back to the number the reader is looking at and the column would read as
+# an error. It is the context, and the other three are the finding.
+INVESTED_STREETS = ("preflop", "flop", "turn", "river")
+POSTFLOP_STREETS = INVESTED_STREETS[1:]
+
+
+def class_street_split(conn, hero, hand_class: str, min_pot_bb: float = 0.0,
+                       window: Window | None = None,
+                       max_pot_bb: float | None = None) -> list[dict]:
+    """One bucket's invested bb, split by the street the money went in on.
+
+    `bb in` says a bucket was paid for rather than folded away. It does not say
+    *when* it was paid for, and the two answers call for opposite fixes: money
+    on the river is a call made after the hand is already over, so the fix is
+    folding; money on the turn is a second barrel into somebody who was never
+    going to fold, so the fix is not betting. A single mean cannot tell those
+    apart and reads as one undifferentiated leak.
+
+    The denominator is every hand in the bucket and range, including the ones
+    that put in nothing after the flop, so the rows sum back to the `bb in` on
+    that row of the made-hand table rather than to something slightly larger.
+    Preflop is what `results.contributed` has that the street columns do not,
+    which is why it is a subtraction rather than a fourth stored column.
+    """
+    wsql, wp = _win(window)
+    hi = float("inf") if max_pot_bb is None else max_pot_bb
+    row = conn.execute(
+        f"""SELECT COUNT(*) n,
+                   SUM(r.contributed     * 1.0 / h.bb) total,
+                   SUM(hp.invested_flop  * 1.0 / h.bb) flop,
+                   SUM(hp.invested_turn  * 1.0 / h.bb) turn,
+                   SUM(hp.invested_river * 1.0 / h.bb) river
+            FROM hand_player hp
+            JOIN hands h   ON h.hand_id = hp.hand_id
+            JOIN results r ON r.hand_id = hp.hand_id AND r.player = hp.player
+            WHERE hp.player = ? AND hp.hand_class = ?
+              AND h.total_pot * 1.0 / h.bb >= ?
+              AND h.total_pot * 1.0 / h.bb < ? AND {wsql}""",
+        (hero, hand_class, min_pot_bb, hi, *wp),
+    ).fetchone()
+
+    n = row["n"] or 0
+    bb = {k: (row[k] or 0.0) for k in POSTFLOP_STREETS}
+    total = row["total"] or 0.0
+    bb["preflop"] = total - sum(bb.values())
+    return [{
+        "street": k,
+        "hands": n,
+        "bb_in": bb[k],
+        "bb_in_hand": bb[k] / n if n else None,
+        # Of everything the bucket put in, so the shares and the per-hand
+        # figures answer to the same total the made-hand table shows.
+        "share": bb[k] / total if total else None,
+    } for k in INVESTED_STREETS]
+
+
+# A street holding more than half the postflop money is a fact the split
+# states about itself, not a threshold anybody chose. Below that the money is
+# spread, and the honest reading is that it is spread, so this says nothing
+# rather than crowning a plurality.
+STREET_MAJORITY = 0.5
+
+
+def dominant_street(rows) -> dict | None:
+    """The postflop street holding an outright majority, or None.
+
+    Preflop is excluded from the question as well as from the denominator: it
+    is not a street anybody is deciding about here, and in a bucket that was
+    mostly folded on the flop it would win every time and say nothing.
+    """
+    post = [r for r in rows if r["street"] in POSTFLOP_STREETS]
+    total = sum(r["bb_in"] for r in post)
+    if total <= 0:
+        return None
+    top = max(post, key=lambda r: r["bb_in"])
+    return top if top["bb_in"] / total > STREET_MAJORITY else None
+
+
+# How many hands a bucket needs before "this is where the money goes" is a
+# claim rather than an anecdote. Deliberately far below MIN_OPPS: big pots are
+# rare by construction -- a whole history of 14,000 hands produced 16 of them
+# reached with no pair -- so a threshold of 30 would silence the section
+# permanently. Five is enough that one cooler cannot be the headline, and the
+# money figure itself is stated either way, because realized losses are a fact
+# and not an estimate of anything.
+MIN_CLASS_HANDS = 5
+
+
+def worst_class(rows) -> dict | None:
+    """The bucket that cost the most, or None when nothing lost money.
+
+    This is the whole section compressed into one row, because a seven-row
+    table is still something the reader has to scan and the point of the
+    section is that one line of it should have been unmissable on day one.
+    """
+    losers = [r for r in rows if r["hands"] and r["net_bb"] < 0]
+    return min(losers, key=lambda r: r["net_bb"]) if losers else None
 
 
 def street_funnel(conn, hero, window: Window | None = None) -> list[dict]:
@@ -853,7 +1066,7 @@ def big_pots(conn: sqlite3.Connection, hero: str, limit: int = 15,
                r.net * 1.0 / h.bb        AS net_bb,
                r.net                     AS net_cents,
                r.reached_showdown, r.cashed_out, r.won_pot,
-               hp.position, hp.hole_combo,
+               hp.position, hp.hole_combo, hp.hand_class,
                hp.saw_flop, hp.saw_turn, hp.saw_river,
                s.hole_cards,
                EXISTS (SELECT 1 FROM actions a
@@ -898,6 +1111,7 @@ def _drilldown_row(conn, r, hero: str) -> dict:
         "position": r["position"] or "",
         "hole_cards": r["hole_cards"] or "",
         "hole_combo": r["hole_combo"] or "",
+        "hand_class": r["hand_class"] or "",
         "board": board,
         "pot_bb": r["pot_bb"],
         "net_bb": r["net_bb"],

@@ -70,10 +70,19 @@ def _bit(rank_plus_one: np.ndarray) -> np.ndarray:
 
 
 def evaluate(cards: np.ndarray) -> np.ndarray:
-    """Score an (N, 7) array of card ints (rank*4 + suit). Returns (N,) int32."""
+    """Score an (N, k) array of card ints (rank*4 + suit). Returns (N,) int32.
+
+    k is five to seven. Seven is the case this is built and validated for; five
+    and six fall out of the same arithmetic, because every step below counts
+    ranks and suits rather than assuming how many cards it was handed, and are
+    what lets a hand be scored on a flop or a turn as well as at a showdown.
+    Scores from different k are still directly comparable -- a pair of kings is
+    a pair of kings whether or not the river has been dealt -- because the
+    tiebreak stores absent kickers as zero.
+    """
     cards = np.asarray(cards)
-    if cards.ndim != 2 or cards.shape[1] != 7:
-        raise ValueError("expected an (N, 7) array of cards")
+    if cards.ndim != 2 or not 5 <= cards.shape[1] <= 7:
+        raise ValueError("expected an (N, 5..7) array of cards")
     n = cards.shape[0]
     ranks = (cards // 4).astype(np.int32)
     suits = (cards % 4).astype(np.int32)

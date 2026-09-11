@@ -435,7 +435,45 @@ def pot_buckets(rows) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. session scatter
+# 7. made-hand strength
+
+
+def hand_classes(rows) -> str:
+    """Net bb by what the hero's hand actually was, weakest bucket first.
+
+    Deliberately the same bar form as the pot-size buckets: the two answer the
+    same question one level apart -- where the money goes, and what was in your
+    hand when it went there -- and a reader who has learned to read one should
+    not have to learn to read the other.
+    """
+    if not rows or not any(r["hands"] for r in rows):
+        return '<p class="empty">No classified hands in this range yet.</p>'
+    vals = [r["net_bb"] for r in rows]
+    yticks, ylo, yhi = nice_ticks(min(vals + [0]), max(vals + [0]), 5)
+    f = Frame(0, len(rows), ylo, yhi, h=340)
+    out = [f.grid(yticks, ylabel="Net bb")]
+    band = (f.right - f.left) / len(rows)
+    for i, r in enumerate(rows):
+        cx = f.left + band * (i + 0.5)
+        bw = min(70, band * 0.55)
+        y0, y1 = f.sy(0), f.sy(r["net_bb"])
+        cls = "pos" if r["net_bb"] >= 0 else "neg"
+        per = "" if r["bb_hand"] is None else f", {fmt(r['bb_hand'], 1)} bb/hand"
+        out.append(
+            f'<rect class="bar {cls}" x="{cx - bw / 2:.1f}" y="{min(y0, y1):.1f}" '
+            f'width="{bw:.1f}" height="{max(abs(y1 - y0), 1):.1f}" rx="4">'
+            f'<title>{esc(r["label"])}: {fmt(r["net_bb"], 1)} bb over '
+            f'{r["hands"]} hand{"" if r["hands"] == 1 else "s"}{per}</title></rect>'
+        )
+        out.append(f'<text class="tick" x="{cx:.1f}" y="{f.bottom + 18}" '
+                   f'text-anchor="middle">{esc(r["class"])}</text>')
+        out.append(f'<text class="tick small" x="{cx:.1f}" y="{f.bottom + 32}" '
+                   f'text-anchor="middle">n={r["hands"]}</text>')
+    return svg("".join(out), h=340)
+
+
+# ---------------------------------------------------------------------------
+# 8. session scatter
 
 
 def session_scatter(sessions) -> str:
@@ -462,7 +500,7 @@ def session_scatter(sessions) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 8. stack-size histogram
+# 9. stack-size histogram
 
 
 def stack_histogram(rows, width: int = 10) -> str:

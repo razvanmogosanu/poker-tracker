@@ -6,13 +6,22 @@ import json
 import sqlite3
 from datetime import datetime
 
-from . import charts, db, stats
+from . import charts, db, handclass, stats
 from .charts import esc, fmt
 from .positions import POSITION_ORDER
 
 # Reference values drawn on the rolling-trend chart. These are targets, not
 # measurements: edit them to match the strategy you are actually running.
 TARGETS = {"vpip": 22.0, "pfr": 18.0, "threebet": 7.0, "btn_open": 45.0}
+
+# How the preflop row of the street breakdown is read, in bb per hand. Under
+# one open the money really is the cost of arriving and belongs in the
+# background; a pot that cost more than a 3-bet was entered on purpose, and at
+# that point it is the largest number in the row and the one decision in it
+# nobody was forced into. These are the sizes of the bets themselves, not
+# tuned cutoffs: an open is 2.5-3bb and a 3-bet pot starts around 10.
+PREFLOP_ARRIVING_BB = 5.0
+PREFLOP_CHOSEN_BB = 10.0
 
 CSS = """
 :root {
@@ -158,6 +167,9 @@ svg.grid13 { max-width: 500px; margin: 6px auto; }
 .legend span { display: inline-flex; align-items: center; gap: 7px; }
 .legend i { width: 22px; height: 0; border-top-width: 2.5px; border-top-style: solid; display: inline-block; }
 table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+/* Ten columns in three groups of three read as one blur without a rule
+   between the groups; the divider is on the first cell of each group. */
+.grp { border-left: 1px solid var(--border); }
 th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -230,6 +242,22 @@ footer { margin-top: 46px; color: var(--muted); font-size: 12.5px; }
 .hands td.when { white-space: nowrap; }
 .hands td.when small { display: block; color: var(--muted); font-size: 11.5px; }
 .hands td.opp { color: var(--ink-2); font-size: 12.5px; }
+.hands td.made { white-space: nowrap; }
+/* The one bucket the section exists to make unmissable. Weight, not hue: it is
+   already in a column of words and a red one would read as a loss rather than
+   as a category. */
+.hands td.made.nopair { font-weight: 600; }
+td.num.muted { color: var(--ink-2); }
+/* The preflop cell is dimmed or spotlit by its own size, never by position:
+   one open is background, a 3-bet pot is the finding. See PREFLOP_*_BB. */
+td.context { color: var(--ink-2); }
+td.chosen {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num.pos { color: var(--pos); } td.num.neg { color: var(--neg); }
+tr.spotlight td { background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .hand-btn {
   font: inherit; font-size: 12.5px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
   background: transparent; color: var(--ink-2); border: 1px solid var(--border);
@@ -764,7 +792,7 @@ def _compliance_table(rows, prior=None) -> str:
 
 HAND_COLUMNS = [
     ("Hand", "text"), ("Time, table", "text"), ("Pos", "text"), ("Cards", "text"),
-    ("Board", "text"), ("Pot (bb)", "num"), ("Net (bb)", "num"),
+    ("Board", "text"), ("Made", "num"), ("Pot (bb)", "num"), ("Net (bb)", "num"),
     ("Exit", "num"), ("Result", "text"), ("Shown", "text"),
 ]
 
@@ -778,6 +806,12 @@ def _hand_rows(rows) -> str:
     for r in rows:
         tag = "win" if r["net_bb"] > 0 else "loss"
         shown = ", ".join(f"{x['player']} {x['cards']}" for x in r["shown"])
+        # Sorting the Made column has to run weakest-to-strongest, not
+        # alphabetically -- "two pair" before "weak pair" would be nonsense.
+        # An unclassified hand (folded preflop) sorts below "no pair".
+        made = r["hand_class"]
+        made_rank = handclass.RANK.get(made, -1)
+        made_cls = " nopair" if made == handclass.NO_PAIR else ""
         out.append(
             "<tr>"
             f"<td><button type=\"button\" class=\"hand-btn\" data-hand=\"{r['hand_id']}\" "
@@ -788,6 +822,7 @@ def _hand_rows(rows) -> str:
             f"<td>{esc(r['position'])}</td>"
             f"<td class=\"cards\">{esc(r['hole_cards'])}</td>"
             f"<td class=\"board\">{esc(r['board'])}</td>"
+            f"<td class=\"made{made_cls}\" data-v=\"{made_rank}\">{esc(made)}</td>"
             f"<td data-v=\"{r['pot_bb']:.4f}\">{r['pot_bb']:.1f}</td>"
             f"<td class=\"money {'pos' if r['net_bb'] > 0 else 'neg'}\" "
             f"data-v=\"{r['net_bb']:.4f}\">{r['net_bb']:+.1f}</td>"
@@ -838,6 +873,221 @@ the original PokerStars text.</p>
     return html, ids
 
 
+def _handclass_banner(big_rows) -> str:
+    """The section compressed to one sentence, or nothing to say.
+
+    The money is stated whenever a bucket lost any, because a realized loss is
+    a fact rather than an estimate of anything. What a thin bucket cannot
+    support is the second sentence -- the one that turns the number into a
+    diagnosis -- so below `stats.MIN_CLASS_HANDS` that sentence is replaced
+    rather than the figure being hidden. A filtered period is where this bites:
+    one cooler is enough to put a bucket at the bottom of a short list.
+    """
+    worst = stats.worst_class(big_rows)
+    total = sum(r["hands"] for r in big_rows)
+    if not worst:
+        if not total:
+            return ""
+        return ('<div class="banner">No made-hand bucket is losing money in '
+                f'pots over {stats.BIG_POT_BB:.0f}bb. Over {total:,} such '
+                'hands that is a small sample, not a verdict.</div>')
+
+    if worst["hands"] >= stats.MIN_CLASS_HANDS:
+        verdict = ('That is the bucket costing you the most in pots big enough '
+                   'to matter. Nothing else on this page names it: the pot-size '
+                   'buckets say the money leaves in big pots, and the '
+                   'biggest-pots list makes you read fifteen hands to find out '
+                   'why.')
+    else:
+        verdict = (f'Fewer than {stats.MIN_CLASS_HANDS} hands, so read it as a '
+                   'hand to go and look at rather than as a pattern. Switch to '
+                   '<b>All</b> for the version that can carry a conclusion.')
+    return (f'<div class="banner"><b>Pots over {stats.BIG_POT_BB:.0f}bb reached '
+            f'with {esc(worst["label"])}: {worst["hands"]:,} '
+            f'hand{"" if worst["hands"] == 1 else "s"}, '
+            f'{worst["net_bb"]:+,.0f} bb.</b> {verdict}</div>')
+
+
+def _preflop_weight(street: str, bb_in_hand) -> str:
+    """How loudly a preflop cell should be read, from its own size.
+
+    Fixed dimming was wrong in the one column that matters. Preflop is the
+    cost of arriving only while it is about one open; at 15bb a hand it is a
+    3-bet pot, which is the largest number in the row and the only money in it
+    that nobody was forced to put in -- and dimming that actively hid it. So
+    the weight comes from the value, per cell, and the same row can be
+    background in one pot range and the finding in another.
+
+    Every other street is left alone: those are all decisions, and there is no
+    size at which a turn barrel stops being one.
+    """
+    if street != "preflop" or bb_in_hand is None:
+        return ""
+    if bb_in_hand < PREFLOP_ARRIVING_BB:
+        return " context"
+    if bb_in_hand >= PREFLOP_CHOSEN_BB:
+        return " chosen"
+    return ""
+
+
+def _naked_street_table(conn, hero: str, window, ranges) -> str:
+    """The naked no-pair row broken out by the street the money went in on.
+
+    The made-hand table says the bucket was paid for; this says when, and the
+    when is what picks the fix. River money is a call made after the hand is
+    over and the answer is to fold; turn money is a barrel into somebody who
+    was never folding and the answer is not to bet. Both look identical in a
+    single `bb in` figure.
+
+    Preflop is carried so the rows add back to that figure. It is not part of
+    the finding -- nothing in this section is a preflop decision -- but a
+    column that does not reconcile with the one above it reads as a bug.
+    """
+    cols = [stats.class_street_split(conn, hero, handclass.NO_PAIR, lo, window, hi)
+            for _, lo, hi in ranges]
+    if not cols[0][0]["hands"]:
+        return ""
+
+    body = []
+    for i, street in enumerate(stats.INVESTED_STREETS):
+        cells = []
+        for c in cols:
+            r = c[i]
+            edge = " grp" if cells else ""
+            per = "-" if r["bb_in_hand"] is None else f'{r["bb_in_hand"]:,.1f}'
+            share = "-" if r["share"] is None else f'{100 * r["share"]:.0f}%'
+            weight = _preflop_weight(street, r["bb_in_hand"])
+            cells.append(f'<td class="num{edge}{weight}">{per}</td>')
+            cells.append(f'<td class="num muted{weight}">{share}</td>')
+        body.append(f"<tr><td>{esc(street)}</td>{''.join(cells)}</tr>")
+
+    heads = "".join(
+        f'<th colspan="2"{" class=\"grp\"" if i else ""}>{esc(name)}</th>'
+        for i, (name, _, _) in enumerate(ranges))
+    subs = "".join(f'<th{" class=\"grp\"" if i else ""}>bb in</th><th>share</th>'
+                   for i in range(len(ranges)))
+    big = cols[-1]
+    top = stats.dominant_street(big)
+    post = [r for r in big if r["street"] in stats.POSTFLOP_STREETS]
+    post_total = sum(r["bb_in"] for r in post)
+    split = " / ".join(
+        f'{100 * r["bb_in"] / post_total:.0f}%' if post_total else "-" for r in post)
+
+    if top:
+        reading = {
+            "flop": "Most of it goes in on the flop, which is a continuation "
+                    "bet that keeps getting called rather than a hand being "
+                    "played badly later.",
+            "turn": "Most of it goes in on the turn: that is a second barrel "
+                    "into somebody who was never going to fold, and the fix is "
+                    "not betting it.",
+            "river": "Most of it goes in on the river, where the hand is "
+                     "already over: that is paying people off, and the fix is "
+                     "folding.",
+        }[top["street"]]
+    else:
+        reading = ("No street holds a majority, so the money is spread and "
+                   "both readings apply at once -- the turn share is barrelling "
+                   "into hands that do not fold, the river share is paying off. "
+                   "They are different fixes and neither one alone accounts for "
+                   "this row.")
+
+    return f"""<p class="panel-head" style="margin-top:22px">Where the
+<b>{esc(handclass.LONG_NAME[handclass.NO_PAIR])}</b> money goes, by street</p>
+<table><thead>
+<tr><th rowspan="2">Street</th>{heads}</tr>
+<tr>{subs}</tr>
+</thead><tbody>{"".join(body)}</tbody></table>
+<p class="note">Per hand, over the same hands as the row above, so the four
+add back to its <b>bb in</b>. Postflop, pots over {stats.BIG_POT_BB:.0f}bb
+split {split} across flop, turn and river. {reading} The preflop cell is read
+by its own size: under {PREFLOP_ARRIVING_BB:.0f}bb it is about one open and is
+dimmed as the cost of arriving, and at {PREFLOP_CHOSEN_BB:.0f}bb or more it is
+a 3-bet pot you chose to build with a hand that flopped nothing, which is the
+loudest number here and is marked as such.</p>"""
+
+
+def _handclass_card(conn, hero: str, window) -> str:
+    """Net by made-hand bucket over three pot ranges, big pots called out.
+
+    Three ranges rather than one. Over every flopped pot the "no pair" row is
+    mostly small pots that were folded and is close to noise; over the big pots
+    it is the row that costs a stack at a time. The middle range is what says
+    which of those two the bucket really is -- 40bb is a high enough bar that
+    only a handful of pots clear it, so the big-pot column alone cannot
+    distinguish a bleed that runs through the medium pots from one that stops
+    at the small ones. Showing only a filtered range would hide how often the
+    bucket is reached, and showing only the unfiltered one would bury the
+    money, so all three are here and the banner says which to read first.
+
+    Every range carries invested bb per hand beside its net, because the net on
+    its own does not say how the money left: at -9 bb a no-pair hand is either
+    a flop float given up cheaply or a river call that should not have been
+    made, and those are opposite mistakes.
+    """
+    ranges = [
+        ("Every flopped pot", 0.0, None),
+        (f"Pots {stats.MID_POT_BB:.0f}-{stats.BIG_POT_BB:.0f}bb",
+         stats.MID_POT_BB, stats.BIG_POT_BB),
+        (f"Pots over {stats.BIG_POT_BB:.0f}bb", stats.BIG_POT_BB, None),
+    ]
+    cols = [stats.hand_classes(conn, hero, lo, window, hi) for _, lo, hi in ranges]
+    all_rows, big_rows = cols[0], cols[-1]
+    by_class = [{r["class"]: r for r in c} for c in cols]
+
+    if not any(r["hands"] for r in all_rows):
+        return ('<div class="card"><p class="empty">No hands have reached a flop '
+                'with known cards yet.</p></div>')
+
+    def money(v, places=1):
+        cls = "pos" if v >= 0 else "neg"
+        return f'<td class="num {cls}">{v:+,.{places}f}</td>'
+
+    def plain(v, places=1):
+        return ('<td class="num">-</td>' if v is None
+                else f'<td class="num">{v:,.{places}f}</td>')
+
+    body = []
+    worst = stats.worst_class(big_rows)
+    for r in all_rows:
+        mark = ' class="spotlight"' if worst and r["class"] == worst["class"] else ""
+        cells = []
+        for lookup in by_class:
+            c = lookup[r["class"]]
+            edge = " grp" if cells else ""
+            cells.append(f'<td class="num{edge}">{c["hands"]:,}</td>')
+            cells.append(money(c["net_bb"]))
+            cells.append(plain(c["bb_in_hand"]))
+        body.append(f"<tr{mark}><td>{esc(r['label'])}</td>{''.join(cells)}</tr>")
+
+    banner = _handclass_banner(big_rows)
+    heads = "".join(
+        f'<th colspan="3"{" class=\"grp\"" if i else ""}>{esc(name)}</th>'
+        for i, (name, _, _) in enumerate(ranges))
+    subs = "".join(f'<th{" class=\"grp\"" if i else ""}>Hands</th>'
+                   "<th>Net bb</th><th>bb in</th>" for i in range(len(ranges)))
+
+    return f"""<div class="card">{banner}
+<p class="panel-head">Net bb in pots over {stats.BIG_POT_BB:.0f}bb, by made hand</p>
+{charts.hand_classes(big_rows)}
+<table style="margin-top:14px"><thead>
+<tr><th rowspan="2">Made hand</th>{heads}</tr>
+<tr>{subs}</tr>
+</thead><tbody>{"".join(body)}</tbody></table>
+<p class="note">The bucket is your hand as of the street you <em>left</em> the
+hand on, so a flop fold is judged on the flop rather than on a river you never
+saw. A hand the board makes on its own does not count as yours: holding A5 on
+K K 7 7 2 is ace high here, not two pair, which is exactly the hand this table
+exists to find. <b>bb in</b> is the average you put in per hand in that range:
+it is what separates a cheap fold from a paid-off one, since the same net can
+be a flop give-up or a river call. The two no-pair rows split on
+{handclass.DRAW_OUTS} outs -- a flush draw or an open-ender, not a gutshot -- because a hand
+that is drawing is supposed to put money in and a naked one never is, and
+averaging them together flatters the bluffs and punishes the semi-bluffs.</p>
+{_naked_street_table(conn, hero, window, ranges)}
+</div>"""
+
+
 def _compact_grid(grid: dict) -> dict:
     """[n, vpip, bb100] per combo. See the note in charts.range_heatmap."""
     return {c: [v["n"], v["vpip"],
@@ -880,6 +1130,7 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
     days = stats.by_time(conn, hero, "%w", w)
     n_sessions = len(stats.sessions(conn, hero, w))
     drill_html, drill_ids = _drilldown(conn, hero, w, 15 if period.is_all else 10)
+    handclass_html = _handclass_card(conn, hero, w)
 
     # ---- tiles. Win rate is deliberately absent from a filtered view: one
     # session is 100-300 hands and its interval is wider than any result it
@@ -1027,6 +1278,7 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
             f'<div class="card">{_compliance_table(comp, comp_prior)}</div>',
         "r-funnel": f'<div class="card">{charts.funnel(funnel_rows)}</div>',
         "r-buckets": f'<div class="card">{charts.pot_buckets(buckets)}</div>',
+        "r-handclass": handclass_html,
         "r-drilldown": drill_html,
         "r-stacks": f'<div class="card">{charts.stack_histogram(stacks)}</div>',
         "r-load": (
@@ -1251,16 +1503,26 @@ hemorrhage in big ones. If the losses concentrate in the top bucket, the problem
 is stack-off decisions, not preflop ranges.</p>
 <div id="r-buckets">{a['r-buckets']}</div>
 
-<h2>10. Biggest pots</h2>
+<h2>10. Made-hand strength</h2>
+<p class="note">The pot-size buckets above say the money leaves in big pots.
+This says what you were holding when it left. Losing a stack with an overpair
+and losing a stack with no pair are different mistakes and only one of them is
+fixed by folding more &mdash; and the row that matters is usually visible
+without reading a single hand.</p>
+<div id="r-handclass">{a['r-handclass']}</div>
+
+<h2>11. Biggest pots</h2>
 <p class="note">Every other section ends in "go look at those hands"; this is
 where you look. The largest losses and largest wins by net big blinds, with the
 board, the exit street, and whatever the opponent showed. A pattern here &mdash;
 stacking off with one pair, folding rivers in the biggest pots, the same
 position over and over &mdash; carries more information than any aggregate on
-this page, because these are the hands the win rate is actually made of.</p>
+this page, because these are the hands the win rate is actually made of. The
+<b>Made</b> column is the bucket from the section above; sort by it to read the
+list as a strength ladder rather than as a money ladder.</p>
 <div id="r-drilldown">{a['r-drilldown']}</div>
 
-<h2>11. Sessions</h2>
+<h2>12. Sessions</h2>
 <p class="note">Each point is one session, split on a gap of more than
 {db.SESSION_GAP_MINUTES} minutes. The boundaries are assigned once when the
 hands are imported and stored on the hand, so "last session" means the same set
@@ -1271,15 +1533,15 @@ history.</p>
 <table><thead><tr><th>Start</th><th>Duration</th><th>Hands</th><th>Tables</th>
 <th>bb/100</th></tr></thead><tbody>{sess_rows}</tbody></table></details></div>
 
-<h2>12. Effective stacks</h2>
+<h2>13. Effective stacks</h2>
 <p class="note">A one-off diagnostic. Once the distribution sits at 100bb you can
 retire this chart. Bars below 80bb are the ones to worry about.</p>
 <div id="r-stacks">{a['r-stacks']}</div>
 
-<h2>13. Table load, timing and attention</h2>
+<h2>14. Table load, timing and attention</h2>
 <div id="r-load">{a['r-load']}</div>
 
-<h2>14. Sample size</h2>
+<h2>15. Sample size</h2>
 <p class="note">Frequency stats converge far faster than results because they
 are bounded proportions. This is the argument for building a tracker around
 frequencies and compliance checks rather than around win rate &mdash; and the

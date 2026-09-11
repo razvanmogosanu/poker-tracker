@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import db, derive, stats
+from . import db, derive, handclass, stats
 
 DEFAULT_ROOT = Path.home() / "AppData/Local/PokerStars.RO/HandHistory"
 DEFAULT_DB = Path(__file__).resolve().parents[1] / "poker.db"
@@ -192,6 +192,61 @@ def cmd_stats(args) -> int:
         print(f"  {mark} {r['stat']:<30} {r['have']:>7} / {r['needed']:<7} "
               f"({r['pct']:.0f}%)")
 
+    print("\nMade-hand strength   (BB IN is the average put in per hand)")
+    print("-" * 106)
+    ranges = [("ALL FLOPPED", 0.0, None),
+              (f"{stats.MID_POT_BB:.0f}-{stats.BIG_POT_BB:.0f}BB",
+               stats.MID_POT_BB, stats.BIG_POT_BB),
+              (f"OVER {stats.BIG_POT_BB:.0f}BB", stats.BIG_POT_BB, None)]
+    cols = [stats.hand_classes(conn, hero, lo, w, hi) for _, lo, hi in ranges]
+    by_class = [{r["class"]: r for r in c} for c in cols]
+    all_rows, big = cols[0], by_class[-1]
+    print(f"  {'':<22}" + "".join(f"|{name:^26}" for name, _, _ in ranges))
+    print(f"  {'':<22}" + f"|{'HANDS':>8}{'NET BB':>10}{'BB IN':>8}" * len(ranges))
+    for r in all_rows:
+        # Net and invested side by side, per range: the same -9 bb is a cheap
+        # flop give-up at 3 bb in and a paid-off river call at 30, and the two
+        # are opposite mistakes.
+        line = f"  {r['label']:<22}"
+        for lookup in by_class:
+            c = lookup[r["class"]]
+            bb_in = "-" if c["bb_in_hand"] is None else f"{c['bb_in_hand']:.1f}"
+            line += f"|{c['hands']:>8}{c['net_bb']:>10.1f}{bb_in:>8}"
+        print(line)
+    # ...and the naked row broken out by street, because "it was paid for" and
+    # "it was paid for on the river" call for different fixes.
+    splits = [stats.class_street_split(conn, hero, handclass.NO_PAIR, lo, w, hi)
+              for _, lo, hi in ranges]
+    if splits[0][0]["hands"]:
+        label = handclass.LONG_NAME[handclass.NO_PAIR]
+        print(f"\n  {label} money, by street   (per hand, and share of it)")
+        print(f"  {'':<22}" + f"|{'BB IN':>10}{'SHARE':>8}" * len(ranges))
+        for i, street in enumerate(stats.INVESTED_STREETS):
+            line = f"  {street:<22}"
+            for c in splits:
+                r = c[i]
+                per = "-" if r["bb_in_hand"] is None else f"{r['bb_in_hand']:.1f}"
+                sh = "-" if r["share"] is None else f"{100 * r['share']:.0f}%"
+                line += f"|{per:>10}{sh:>8}"
+            print(line)
+        top = stats.dominant_street(splits[-1])
+        if top:
+            print(f"  > over {stats.BIG_POT_BB:.0f}bb it is mostly the "
+                  f"{top['street']}")
+        else:
+            print("  > no street holds a majority; the money is spread across "
+                  "all three")
+
+    worst = stats.worst_class(list(big.values()))
+    if worst:
+        # The one line this whole section exists to print. The marker drops to
+        # a question mark below MIN_CLASS_HANDS: the money was really lost, but
+        # one cooler is enough to put a bucket at the bottom of a short list.
+        mark = "!" if worst["hands"] >= stats.MIN_CLASS_HANDS else "?"
+        print(f"  {mark} pots over {stats.BIG_POT_BB:.0f}bb reached with "
+              f"{worst['label']}: {worst['hands']} hand(s), "
+              f"{worst['net_bb']:+.0f} bb")
+
     pots = stats.big_pots(conn, hero, 10, w)
     for label, key in (("Biggest losses", "losses"), ("Biggest wins", "wins")):
         rows = pots[key]
@@ -202,7 +257,8 @@ def cmd_stats(args) -> int:
         for r in rows:
             print(f"  #{r['site_hand_no']:<13}{r['played_at'][5:16]}  "
                   f"{r['position']:<4}{r['hole_cards'] or '--':<8}"
-                  f"{r['board'] or '':<16}pot {r['pot_bb']:6.1f}  "
+                  f"{r['board'] or '':<16}{r['hand_class'] or '':<12}"
+                  f"pot {r['pot_bb']:6.1f}  "
                   f"{r['net_bb']:+8.1f}bb  {r['exit_street']:<9}{r['outcome']}")
 
     sess = stats.sessions(conn, hero, w)

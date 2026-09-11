@@ -66,7 +66,8 @@ positions.py  position derived from the button, never parsed
 db.py         SQLite schema and idempotent loader; assigns session ids
 derive.py     replays actions into one flag row per (hand, player)
 stats.py      SQL aggregations, every rate carrying its own confidence interval
-evaluator.py  vectorized 7-card evaluator (numpy, table-driven)
+evaluator.py  vectorized 5-to-7-card evaluator (numpy, table-driven)
+handclass.py  the made-hand bucket: what you actually had, not what the board had
 equity.py     all-in EV by exhaustive board enumeration, with side pots
 charts.py     inline SVG, theme-aware
 report.py     assembles the dashboard
@@ -168,6 +169,17 @@ These are the choices you will otherwise re-derive wrong in six months.
   make positional win rates meaningless.
 - **A fold can show cards** (`Slosh419: folds [2h Qh]`). Those cards are
   captured, not discarded.
+- **A hand the board makes on its own is not your hand.** On K K 7 7 2 an
+  evaluator says everybody holds two pair; a player holding A5 has ace high.
+  The made-hand buckets are about how your *hole cards* attach to the board, so
+  that hand is filed under "no pair", which is what it is worth and what it will
+  cost you. Same rule at every strength: two pair means your cards made two
+  pairs, and a straight on the board that you did not improve on is not yours.
+- **Your made hand is measured at the street you left the hand on**, not at the
+  river. The board runs out in a multiway pot whether or not you are still in
+  it, and judging a flop fold against a card that had not been dealt yet says
+  nothing about the decision. Top pair on the flop is second pair once an ace
+  turns, and the bucket says second pair.
 - **Position is by seat, never by the blind posted.** A player posting a dead
   blind out of position keeps the position their seat gives them.
 
@@ -228,6 +240,37 @@ The four-line winnings chart is the reason trackers exist. The rest supports it.
   High WWSF with low WTSD is fine, but check the red line supports it.
 - **Pot-size buckets** are the fastest read in the report. Losses concentrated
   in the top bucket mean the problem is stack-off decisions, not preflop ranges.
+- **Made-hand strength** answers the question the pot-size buckets raise. They
+  say the money leaves in big pots; this says what you were holding when it
+  left. Eight buckets from "no pair" to "straight or better", each with hands,
+  net bb and bb invested over three pot ranges — every flopped pot, 15–40bb,
+  and over 40bb — and the worst bucket called out as a sentence:
+
+  > Pots over 40bb reached with no pair, no draw: 16 hands, −383 bb.
+
+  Losing a stack with an overpair and losing a stack with no pair are different
+  mistakes and only one of them is fixed by folding more. The same bucket
+  appears as a sortable **Made** column in the biggest-pots table, so the list
+  can be read as a strength ladder instead of a money ladder.
+
+  Three things make that table say something a bare net cannot:
+
+  - **"No pair" is split on eight outs** — a flush draw or an open-ender, not a
+    gutshot. A naked ace-high that fired three streets and a flopped flush draw
+    are opposite hands: one is supposed to put money in and the other never is.
+    Averaged together they hide each other.
+  - **Invested bb travels beside the net**, because −9 bb is either a cheap
+    flop give-up or a river call that should not have happened.
+  - **The naked row is broken out by street**, because money on the river is a
+    call made after the hand is over (fold more) and money on the turn is a
+    barrel into somebody who was never folding (bet less). Preflop is carried so
+    the rows add back, dimmed when it is about one open and highlighted above
+    10bb, where it is a 3-bet pot you chose to build with a hand that flopped
+    nothing.
+
+  The split also makes the oldest piece of advice measurable for the first
+  time: a compliance check reports what share of the postflop money you commit
+  with no pair goes in without eight outs.
 - **The period selector** at the top filters the tables, the frequencies and
   the compliance checks, and adds a comparison against everything before the
   selected window. It answers "is the thing I am working on moving", which is

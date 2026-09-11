@@ -21,11 +21,20 @@ wrong in six months):
   Blind posts never raise the level; the first voluntary raise is the open,
   even if there were limpers before it.
 * An opportunity is counted at most once per hand per player.
+* `hand_class` is the made-hand bucket as of the street the player LEFT the
+  hand on, not as of the river. See `_classify_rows`.
+* `postflop_invested` is cents added on the flop, turn and river only. Every
+  blind and ante is a preflop action, so it needs no exclusion of its own.
+  `invested_flop` / `_turn` / `_river` are the same money by street and sum
+  back to it.
 """
 
 from __future__ import annotations
 
 import sqlite3
+
+from . import handclass
+from .cards import parse_cards
 
 STREETS_AFTER_PREFLOP = ("flop", "turn", "river")
 STEAL_POSITIONS = ("CO", "BTN", "SB")
@@ -40,6 +49,9 @@ CREATE TABLE hand_player (
     hole_combo TEXT,
     starting_stack INTEGER,
     eff_stack_bb REAL,
+    -- made-hand bucket at the moment this player left the hand; NULL when
+    -- there is nothing to classify (folded preflop, or cards never shown)
+    hand_class TEXT,
 
     vpip INTEGER DEFAULT 0,
     pfr INTEGER DEFAULT 0,
@@ -87,6 +99,19 @@ CREATE TABLE hand_player (
     aggr_turn INTEGER DEFAULT 0, calls_turn INTEGER DEFAULT 0, folds_turn INTEGER DEFAULT 0,
     aggr_river INTEGER DEFAULT 0, calls_river INTEGER DEFAULT 0, folds_river INTEGER DEFAULT 0,
 
+    -- cents this player put in after the flop was dealt. The made-hand bucket
+    -- says what you held; this says what holding it cost, which is the half
+    -- that separates a flop give-up from a river call. Blind posts are
+    -- preflop by definition, so this is voluntary money only.
+    postflop_invested INTEGER DEFAULT 0,
+    -- ...and the same money split by the street it went in on, because the
+    -- total cannot tell a barrel from a pay-off. Money on the river is a call
+    -- made with the hand already finished; money on the turn is a bet into
+    -- somebody who is not folding. They sum back to postflop_invested.
+    invested_flop INTEGER DEFAULT 0,
+    invested_turn INTEGER DEFAULT 0,
+    invested_river INTEGER DEFAULT 0,
+
     wwsf INTEGER DEFAULT 0,
     wtsd INTEGER DEFAULT 0,
     wsd INTEGER DEFAULT 0,
@@ -95,6 +120,7 @@ CREATE TABLE hand_player (
 );
 CREATE INDEX ix_hp_player ON hand_player(player);
 CREATE INDEX ix_hp_hero ON hand_player(is_hero, position);
+CREATE INDEX ix_hp_class ON hand_player(player, hand_class);
 """
 
 _INT_COLUMNS = [
@@ -112,6 +138,7 @@ _INT_COLUMNS = [
     "donk_river",
     "aggr_flop", "calls_flop", "folds_flop", "aggr_turn", "calls_turn", "folds_turn",
     "aggr_river", "calls_river", "folds_river",
+    "postflop_invested", "invested_flop", "invested_turn", "invested_river",
     "wwsf", "wtsd", "wsd", "was_allin",
 ]
 
@@ -119,6 +146,8 @@ _INT_COLUMNS = [
 def _blank(player: str) -> dict:
     row = {c: 0 for c in _INT_COLUMNS}
     row["player"] = player
+    # Not every hand has a hand to classify, and 0 is not "no pair".
+    row["hand_class"] = None
     return row
 
 
@@ -133,7 +162,7 @@ def rebuild(conn: sqlite3.Connection, progress=None) -> int:
     seats_by_hand: dict[int, list] = {}
     for r in conn.execute(
         "SELECT hand_id, seat_no, player, starting_stack, position, is_hero,"
-        " hole_combo, is_dealt_in FROM seats ORDER BY hand_id, seat_no"
+        " hole_cards, hole_combo, is_dealt_in FROM seats ORDER BY hand_id, seat_no"
     ):
         seats_by_hand.setdefault(r["hand_id"], []).append(r)
 
@@ -163,8 +192,10 @@ def rebuild(conn: sqlite3.Connection, progress=None) -> int:
         if progress and i % 5000 == 0:
             progress(i, len(hands))
 
+    _classify_rows(rows, hands, seats_by_hand)
+
     cols = ["hand_id", "player", "position", "is_hero", "hole_combo",
-            "starting_stack", "eff_stack_bb"] + _INT_COLUMNS
+            "starting_stack", "eff_stack_bb", "hand_class"] + _INT_COLUMNS
     conn.executemany(
         f"INSERT INTO hand_player ({','.join(cols)}) "
         f"VALUES ({','.join('?' * len(cols))})",
@@ -172,6 +203,55 @@ def rebuild(conn: sqlite3.Connection, progress=None) -> int:
     )
     conn.commit()
     return len(rows)
+
+
+def _classify_rows(rows, hands, seats_by_hand) -> int:
+    """Attach a made-hand bucket to every row whose cards are known.
+
+    The board used is the board as of the street the player LEFT the hand on,
+    which is what `saw_flop`/`saw_turn`/`saw_river` already say. A player who
+    folds the flop in a multiway pot never sees the turn and the river even
+    though they are dealt, and scoring their fold against five cards would
+    judge the decision on information that did not exist when it was made.
+
+    Cards are known for the hero in every hand and for opponents only at a
+    showdown, so most opponent rows stay NULL. That is fine: the bucket is a
+    fact about a specific player's hand, and a row without it simply does not
+    appear in the summary's denominator.
+
+    Runs once over the whole rebuild rather than per hand, because the
+    evaluator is vectorized and calling it 50,000 times would throw that away.
+    """
+    boards = {h["hand_id"]: (h["board_flop"], h["board_turn"], h["board_river"])
+              for h in hands}
+    holes = {(s["hand_id"], s["player"]): s["hole_cards"]
+             for seats in seats_by_hand.values() for s in seats}
+
+    pending, inputs = [], []
+    for r in rows:
+        if not r["saw_flop"]:
+            continue
+        hole_txt = holes.get((r["hand_id"], r["player"])) or ""
+        flop, turn, river = boards.get(r["hand_id"], ("", "", ""))
+        if not hole_txt or not flop:
+            continue
+        board_txt = " ".join(
+            x for x in (flop,
+                        turn if r["saw_turn"] else "",
+                        river if r["saw_river"] else "") if x
+        )
+        try:
+            hole, board = parse_cards(hole_txt), parse_cards(board_txt)
+        except ValueError:
+            continue  # a malformed card is a parser problem, not a crash here
+        if len(hole) != 2 or not 3 <= len(board) <= 5:
+            continue
+        pending.append(r)
+        inputs.append((hole, board))
+
+    for r, bucket in zip(pending, handclass.classify_many(inputs)):
+        r["hand_class"] = bucket
+    return len(pending)
 
 
 def _derive_hand(hand, seats, actions, results) -> list[dict]:  # noqa: C901
@@ -296,6 +376,27 @@ def _derive_hand(hand, seats, actions, results) -> list[dict]:  # noqa: C901
                 F[f"saw_{street}"] = 1
 
     # ---------------- postflop ------------------------------------------
+    # Money added after the flop, before any of the street-by-street logic
+    # below, because it is a plain sum over the actions and depends on none of
+    # it. `amount` and not `to_amount`: this is chips added, and for a raise
+    # PokerStars prints the increment over the previous level rather than the
+    # total, which is exactly the trap `to_amount` exists to avoid elsewhere.
+    #
+    # This is the one place that reads `actions` rather than `acts`, because it
+    # is the one place a "returns" row matters. An uncalled bet comes straight
+    # back and was never invested in anything; the row carries the negative
+    # amount that cancels the bet, so summing over it is what keeps this at or
+    # below what the player actually contributed. Everything else here is
+    # counting decisions, where a return is not one.
+    # The split by street rides along here rather than in its own pass: it is
+    # the same sum with the street kept instead of thrown away, and a returned
+    # bet cancels on the street it was made on.
+    for a in actions:
+        if a["street"] in STREETS_AFTER_PREFLOP and a["player"] in flags:
+            amt = a["amount"] or 0
+            flags[a["player"]]["postflop_invested"] += amt
+            flags[a["player"]][f"invested_{a['street']}"] += amt
+
     order = _postflop_order(dealt, hand["button_seat"])
     for street in STREETS_AFTER_PREFLOP:
         if not boards[street]:

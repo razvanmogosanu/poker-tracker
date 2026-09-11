@@ -115,6 +115,46 @@ class TestEvaluator(unittest.TestCase):
         # Playing the board: identical sevens must tie.
         self.assertEqual(ev("2c 3d As Ks Qs Js Ts"), ev("2h 3s As Ks Qs Js Ts"))
 
+    def test_five_and_six_card_hands_agree_with_the_reference(self):
+        """Scoring a flop or a turn is the same arithmetic with fewer cards.
+
+        The classifier needs a hand scored before the river, so the evaluator
+        accepts five and six cards as well. Nothing about the encoding changes:
+        the reference here is the same brute force, over whatever it was given.
+        """
+        rng = random.Random(20260910)
+        for k in (5, 6):
+            hands = [rng.sample(range(52), k) for _ in range(1500)]
+            fast = evaluate(np.array(hands, dtype=np.int32))
+            slow = [max(score5(c) for c in combinations(h, 5)) for h in hands]
+            mismatches = 0
+            for i in range(0, len(hands) - 1, 2):
+                j = i + 1
+                if sign(int(fast[i]) - int(fast[j])) != sign(
+                        (slow[i] > slow[j]) - (slow[i] < slow[j])):
+                    mismatches += 1
+            self.assertEqual(mismatches, 0, f"{k}-card hands")
+
+    def test_a_hand_keeps_its_score_as_dead_cards_are_added(self):
+        """Scores from different card counts stay comparable.
+
+        A pair of kings on the flop and the same pair of kings at the river are
+        the same hand, and the classifier compares a five-card board against a
+        seven-card holding, so an absent kicker must be zero rather than
+        something that reorders the tiebreak.
+        """
+        def ev(text):
+            return int(evaluate(np.array(
+                [[card_to_int(c) for c in text.split()]], dtype=np.int32))[0])
+
+        self.assertEqual(ev("Kc Kd 9h 5s 2c") >> 20, ev("Kc Kd 9h 5s 2c 3d 4h") >> 20)
+        # Six cards to a flush: the sixth must not become a kicker.
+        self.assertEqual(ev("As Ks Qs Js 9s 2d") >> 20, 5)
+
+    def test_fewer_than_five_cards_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evaluate(np.zeros((1, 4), dtype=np.int32))
+
     def test_seven_card_uses_best_five(self):
         def ev(text):
             return int(evaluate(np.array(
