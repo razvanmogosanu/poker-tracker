@@ -12,6 +12,7 @@ import re
 import sqlite3
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1148,17 +1149,24 @@ class TestPeriodFilters(unittest.TestCase):
 
 
 class TestTodayIsACalendarDay(unittest.TestCase):
-    """"Today" is the last hand's date, not a rolling 24 hours back from it.
+    """"Today" is the date on the clock, not a rolling 24 hours of history.
 
-    The distinction is invisible on most histories and decisive on the one
-    that matters: a session played through midnight. A rolling window would
-    keep the whole evening under a button labelled "Today"; the calendar day
-    keeps only the hands dealt after midnight, which is what the label claims.
-    That is also what makes it a boundary that jumps rather than slides, and
-    the reason the report's reload restore checks its band.
+    Two things follow and both are tested here. A session played through
+    midnight splits: a rolling window would keep the whole evening under a
+    button labelled "Today", where the calendar day keeps only the hands dealt
+    after midnight, which is what the label claims. And a day with no hands
+    offers no button at all, rather than hanging the label on the last day
+    that happened to have some -- the failure that put 2,142 hands from
+    yesterday behind a button that said "Today".
+
+    The clock is injected so the test is not one, and the split is also what
+    makes this boundary jump rather than slide, which is why the report's
+    reload restore checks its band.
     """
 
     HERO = "Btn"
+    # After midnight on the last night of play; see the stamps in setUp.
+    NOW = datetime(2026, 9, 4, 0, 30)
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -1191,8 +1199,9 @@ class TestTodayIsACalendarDay(unittest.TestCase):
             (self.HERO,)).fetchone()["n"]
         self.assertGreater(self.hero_after_midnight, 0)
 
-    def _period(self, key):
-        return next((p for p in stats.periods(self.conn, self.HERO)
+    def _period(self, key, now=None):
+        return next((p for p in stats.periods(self.conn, self.HERO,
+                                              now=now or self.NOW)
                      if p.key == key), None)
 
     def test_today_stops_at_midnight_rather_than_24_hours_back(self):
@@ -1205,6 +1214,17 @@ class TestTodayIsACalendarDay(unittest.TestCase):
         self.assertGreater(today.prior.hands, 0)
         self.assertEqual(today.selected.hands + today.prior.hands,
                          self._period("all").selected.hands)
+
+    def test_a_day_with_no_hands_offers_no_button(self):
+        """Rather than labelling the last day that had some as "today"."""
+        later = datetime(2026, 9, 6, 18, 0)
+        self.assertIsNone(self._period("today", now=later))
+        # And it is the only thing the clock moves: the rest of the list
+        # describes positions in the history, which two idle days do not
+        # touch.
+        def keys(now):
+            return [p.key for p in stats.periods(self.conn, self.HERO, now=now)]
+        self.assertEqual(set(keys(self.NOW)) - set(keys(later)), {"today"})
 
     def test_the_sitting_is_still_one_session_across_the_boundary(self):
         """Which is the whole reason "Today" and "Last session" can disagree."""

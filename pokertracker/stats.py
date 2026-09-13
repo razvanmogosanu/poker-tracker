@@ -135,7 +135,8 @@ def _before(boundary) -> tuple[str, tuple]:
 
 
 def periods(conn: sqlite3.Connection, hero: str,
-            last_n: tuple[int, ...] = LAST_N_HANDS) -> list[Period]:
+            last_n: tuple[int, ...] = LAST_N_HANDS,
+            now: "datetime | None" = None) -> list[Period]:
     """The period options to offer, given what is actually in the database.
 
     An option is dropped when it is empty, when it covers the whole history
@@ -170,20 +171,29 @@ def periods(conn: sqlite3.Connection, hero: str,
             i -= 1
         return i if i < total else None
 
-    # "Today" is the calendar day the last hand falls on, not a rolling 24
-    # hours back from it, and it is anchored on that hand rather than on the
-    # clock for the same reason every other option here is: a period that went
-    # empty overnight would be dropped, and the reader opening the report on
-    # Sunday morning wants Saturday's session, not a button that has vanished.
-    # It is the one option whose boundary can jump rather than slide -- playing
-    # through midnight moves it by a whole evening -- which is why the report's
-    # reload restore checks its band, exactly as it does for "Last session".
+    # "Today" is the calendar day on the clock, and it is the only option here
+    # anchored on the clock rather than on the last hand. Every other one
+    # describes a position in the history -- "last session" and "last 500
+    # hands" stay true of the same hands however long ago they were played --
+    # but "today" is a claim about the date, and anchoring it on the last hand
+    # would hang the label on yesterday's play, or last month's, whenever a
+    # day was skipped. Having it disappear on a day with no hands is the
+    # honest answer rather than a gap to paper over: an empty period is
+    # dropped, and a day you did not play is a day with nothing to show.
+    #
+    # `played_at` is the local timestamp from the history (`played_at_et`
+    # holds the site's), so it compares against the local clock as it stands.
+    #
+    # It is also the one option whose boundary jumps rather than slides --
+    # midnight moves it by a whole evening -- which is why the report's reload
+    # restore checks its band, as it does for "Last session".
+    today = (now or datetime.now()).date()
     candidates = [
         ("session", "Last session",
          index_from(lambda r: r["session_id"] == last_session)),
         ("today", "Today",
          index_from(lambda r: datetime.fromisoformat(r["played_at"]).date()
-                    == last_t.date())),
+                    == today)),
         ("week", "Last 7 days",
          index_from(lambda r: datetime.fromisoformat(r["played_at"])
                     >= last_t - timedelta(days=7))),

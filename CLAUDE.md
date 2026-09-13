@@ -295,6 +295,16 @@ Multi-tabling puts several hands on the same second, and a tie broken
 arbitrarily would let one hand fall into both the selected window and the prior
 one, which would break exactly that partition property.
 
+**"Today" is the only option anchored on the clock**, and `periods()` takes a
+`now` so that is testable. Every other option describes a position in the
+history and stays true of the same hands however long ago they were played;
+"today" is a claim about the date, so anchoring it on the last hand -- which is
+what it did first -- hangs the label on yesterday's play the moment a day is
+skipped, and it shipped reading "Today &middot; 2,142 hands" on a day with none.
+Disappearing on such a day is the honest answer, and the empty-option rule
+below already does it. `played_at` is the history's local timestamp, so it
+compares against the local clock without conversion.
+
 Options that are empty, that cover the whole history, or that start at the same
 hand as an option already offered are dropped — after one evening, "last
 session", "today" and "last 7 days" select the same hands, and three buttons
