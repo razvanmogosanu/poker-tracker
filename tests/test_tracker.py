@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pokertracker import db, derive, handclass, report, stats  # noqa: E402
+from pokertracker import charts, db, derive, handclass, report, stats  # noqa: E402
 from pokertracker.cards import parse_cards  # noqa: E402
 from pokertracker.parser import parse_file, parse_money  # noqa: E402
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
@@ -1316,6 +1316,82 @@ class TestLastSevenDaysIsOnTheClock(unittest.TestCase):
         moved = set(keys(self.NOW)) ^ set(keys(datetime(2026, 9, 24, 12, 0)))
         self.assertTrue(moved <= {"today", "week"}, moved)
         self.assertIn("session", keys(datetime(2026, 9, 24, 12, 0)))
+
+
+class TestStaleness(unittest.TestCase):
+    """The live page reloads when it is behind, not when its own poll imported.
+
+    Two pollers -- a second tab, or `cli refresh` in a terminal -- race for the
+    import. Whichever call runs first brings the hands in and every other one
+    is truthfully told it imported nothing, so a page keyed on its own
+    `new_hands` went stale and stayed stale. The page stamps what it rendered
+    from instead, which is a fact about the page rather than about the race.
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(self.conn, hand, str(path))
+        db.assign_sessions(self.conn)
+        derive.rebuild(self.conn)
+
+    def _stamp(self, html):
+        m = re.search(r'id="refresh-status"[^>]*data-hands="(\d+)"', html)
+        return None if m is None else int(m.group(1))
+
+    def test_the_live_page_stamps_the_hand_count_it_rendered_from(self):
+        total = self.conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
+        self.assertEqual(self._stamp(report.build(self.conn, "Btn", live=True)),
+                         total)
+
+    def test_the_stamp_counts_every_hand_the_server_will_report(self):
+        """`run_refresh` returns a bare COUNT(*), tournaments included, so the
+        two figures have to be counted the same way or they never agree."""
+        html = report.build(self.conn, "Btn", live=True)
+        self.assertGreater(
+            self.conn.execute(
+                "SELECT COUNT(*) n FROM hands WHERE tournament_id != ''"
+            ).fetchone()["n"], 0, "fixtures should include a tournament hand")
+        self.assertEqual(self._stamp(html),
+                         self.conn.execute(
+                             "SELECT COUNT(*) n FROM hands").fetchone()["n"])
+
+    def test_the_on_disk_report_carries_no_stamp(self):
+        """Nothing polls it, and it deliberately never refreshes."""
+        self.assertIsNone(self._stamp(report.build(self.conn, "Btn")))
+
+
+class TestDirectLabelsDoNotCollide(unittest.TestCase):
+    """Two lines finishing at the same value must not stack two labels there.
+
+    On the real history "Total" and "All-in adj. EV" end within a few pixels
+    whenever luck is near zero, which is the ordinary case.
+    """
+
+    def test_labels_closer_than_a_line_height_are_pushed_apart(self):
+        out = charts.stack_labels([100.0, 103.0, 300.0], 0.0, 400.0)
+        self.assertGreaterEqual(out[1] - out[0], charts.LABEL_GAP)
+        self.assertEqual(out[2], 300.0, "a label with room keeps its place")
+
+    def test_order_is_preserved_so_a_label_never_names_the_wrong_line(self):
+        targets = [220.0, 100.0, 101.0, 99.0]
+        out = charts.stack_labels(targets, 0.0, 400.0)
+        by_target = sorted(range(len(targets)), key=lambda i: targets[i])
+        self.assertEqual(by_target,
+                         sorted(range(len(out)), key=lambda i: out[i]))
+
+    def test_a_stack_that_runs_off_the_bottom_is_pushed_back_inside(self):
+        out = charts.stack_labels([398.0, 399.0, 400.0], 0.0, 400.0)
+        self.assertLessEqual(max(out), 400.0)
+        self.assertGreaterEqual(min(out), 0.0)
+        for a, b in zip(sorted(out), sorted(out)[1:]):
+            self.assertGreaterEqual(b - a, charts.LABEL_GAP)
+
+    def test_a_label_alone_is_left_exactly_where_its_line_ends(self):
+        self.assertEqual(charts.stack_labels([57.0], 0.0, 400.0), [57.0])
 
 
 class TestTournamentsExcluded(unittest.TestCase):

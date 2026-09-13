@@ -123,6 +123,42 @@ class Frame:
         return "".join(out)
 
 
+# A direct label's own line height, plus a hair. Labels closer than this
+# overlap into an unreadable smudge.
+LABEL_GAP = 13.0
+
+
+def stack_labels(targets: list[float], lo: float, hi: float,
+                 gap: float = LABEL_GAP) -> list[float]:
+    """Nudge direct labels apart, keeping each as near its line as it can be.
+
+    Direct labels sit at the end of the line they name, which is the whole
+    point of them -- identity never rests on colour. But two series that end
+    at the same value put two labels in the same place, and on the real
+    history "Total" and "All-in adj. EV" do exactly that whenever luck is
+    near zero, which is the normal case rather than an odd one.
+
+    Order is preserved, so a label never crosses the line above or below it
+    and cannot end up naming the wrong one. Returned in the caller's order.
+    """
+    order = sorted(range(len(targets)), key=lambda i: targets[i])
+    ys = [targets[i] for i in order]
+    for j in range(1, len(ys)):
+        ys[j] = max(ys[j], ys[j - 1] + gap)
+    # Pushing down can run off the bottom; if it did, take the whole stack
+    # back up and resolve the collisions in the other direction.
+    if ys and ys[-1] > hi:
+        ys = [y - (ys[-1] - hi) for y in ys]
+        for j in range(len(ys) - 2, -1, -1):
+            ys[j] = min(ys[j], ys[j + 1] - gap)
+        if ys[0] < lo:
+            ys = [y + (lo - ys[0]) for y in ys]
+    out = [0.0] * len(targets)
+    for pos, i in enumerate(order):
+        out[i] = ys[pos]
+    return out
+
+
 def svg(body: str, w=W, h=H, cls="chart") -> str:
     return (f'<svg class="{cls}" viewBox="0 0 {w} {h}" '
             f'preserveAspectRatio="xMidYMid meet" role="img">{body}</svg>')
@@ -173,14 +209,17 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
     # relative to everything that came before them.
     out.append(f'<rect class="period-band" x="{f.left}" y="{f.top}" width="0" '
                f'height="{f.bottom - f.top:.1f}"/>')
-    for name, vals, key, dash in series:
+    # Direct labels at the end of each line, so identity never rests on colour,
+    # spread apart where two lines finish on top of each other.
+    label_ys = stack_labels([f.sy(vals[-1]) + 4 for _, vals, _, _ in series],
+                            f.top, f.bottom)
+    for (name, vals, key, dash), label_y in zip(series, label_ys):
         pts = " ".join(f"{f.sx(i + 1):.1f},{f.sy(v):.1f}" for i, v in enumerate(vals))
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
         out.append(f'<polyline class="line {key}" points="{pts}"{dash_attr}/>')
-        # Direct label at the end of each line, so identity never rests on colour.
         out.append(
             f'<text class="direct-label {key}" x="{f.right + 6}" '
-            f'y="{f.sy(vals[-1]) + 4:.1f}">{esc(name)}</text>'
+            f'y="{label_y:.1f}">{esc(name)}</text>'
         )
 
     payload = json.dumps({

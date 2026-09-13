@@ -659,6 +659,9 @@ LIVE_JS = """
   const SCROLL = 'pt-scroll';
   const RELOADED = 'pt-reloaded';
   const EVERY = 60000;
+  // What this page was rendered from. Staleness is a fact about the page, not
+  // about whether our own refresh call happened to be the one that imported.
+  const RENDERED = parseInt(status.dataset.hands, 10);
 
   // A reload would otherwise throw the reader back to the top of the page.
   const saved = sessionStorage.getItem(SCROLL);
@@ -703,12 +706,17 @@ LIVE_JS = """
         return;
       }
       stamp = new Date();
-      if (!d.new_hands) {
+      // d.new_hands is what this call imported; the total is what the server
+      // holds. Only the second one can say whether the page is behind.
+      const behind = Number.isNaN(RENDERED) ? d.new_hands
+                                            : d.total_hands - RENDERED;
+      if (!behind) {
         busy = false;
         showStamp();
         return;
       }
-      status.textContent = '+' + d.new_hands + ' hands, reloading';
+      status.textContent = (behind > 0 ? '+' + behind + ' hands' : 'history changed')
+                           + ', reloading';
       // Both are read once on the way back and cleared, so only the reload
       // this line is about restores anything.
       sessionStorage.setItem(SCROLL, String(window.scrollY));
@@ -1479,9 +1487,18 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
                    " The window is narrowed from the usual 1,000 because the "
                    "sample is smaller than that, so the line is correspondingly "
                    "noisier.")
-    toolbar = ("""
+    # The page stamps the hand count it was rendered from, so the poll can ask
+    # "is what I am showing still current" rather than "did my own call import
+    # anything". Those are different questions the moment a second poller
+    # exists -- another tab, or a `cli refresh` in the terminal -- because
+    # whichever refresh runs first does the importing and every other one is
+    # told nothing arrived. The loser of that race used to go stale and stay
+    # stale. It counts every hand, tournaments included, to match the figure
+    # `serve.run_refresh` reports back.
+    rendered_hands = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
+    toolbar = (f"""
 <div class="toolbar">
-  <span id="refresh-status" class="status">Checking every 60s</span>
+  <span id="refresh-status" class="status" data-hands="{rendered_hands}">Checking every 60s</span>
 </div>""" if live else "")
     live_js = LIVE_JS if live else ""
     a = regions["all"]
