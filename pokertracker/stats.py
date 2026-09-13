@@ -161,7 +161,6 @@ def periods(conn: sqlite3.Connection, hero: str,
 
     from datetime import datetime, timedelta
 
-    last_t = datetime.fromisoformat(rows[-1]["played_at"])
     last_session = rows[-1]["session_id"]
 
     def index_from(pred) -> int | None:
@@ -171,23 +170,35 @@ def periods(conn: sqlite3.Connection, hero: str,
             i -= 1
         return i if i < total else None
 
-    # "Today" is the calendar day on the clock, and it is the only option here
-    # anchored on the clock rather than on the last hand. Every other one
-    # describes a position in the history -- "last session" and "last 500
-    # hands" stay true of the same hands however long ago they were played --
-    # but "today" is a claim about the date, and anchoring it on the last hand
-    # would hang the label on yesterday's play, or last month's, whenever a
-    # day was skipped. Having it disappear on a day with no hands is the
-    # honest answer rather than a gap to paper over: an empty period is
-    # dropped, and a day you did not play is a day with nothing to show.
+    # "Today" and "Last 7 days" are dates on the clock; everything else here
+    # describes a position in the history. "Last session" and "last 500 hands"
+    # stay true of the same hands however long ago they were played, but these
+    # two make a claim about the calendar, and anchoring them on the last hand
+    # -- which is what they both did first -- hangs the label on whenever you
+    # last happened to play. "Today" shipped reading 2,142 hands on a day with
+    # none in it; "last 7 days" had the same bug more quietly, since it would
+    # mean the week around a session from a month ago.
+    #
+    # Both are whole calendar days rather than rolling multiples of 24 hours,
+    # so they move at midnight and nowhere else. A window that slid through the
+    # afternoon would answer a question nobody asks, and "7 days" counts days:
+    # today and the six before it.
+    #
+    # Going empty is the honest answer rather than a gap to paper over -- the
+    # empty-option rule below drops them, and a stretch you did not play is a
+    # stretch with nothing to show. It bites "today" often and "last 7 days"
+    # rarely, which is the difference between the two labels, not a flaw in
+    # either.
     #
     # `played_at` is the local timestamp from the history (`played_at_et`
     # holds the site's), so it compares against the local clock as it stands.
     #
-    # It is also the one option whose boundary jumps rather than slides --
-    # midnight moves it by a whole evening -- which is why the report's reload
-    # restore checks its band, as it does for "Last session".
+    # Only "today" is in the report's JUMPY list. Midnight moves it by a whole
+    # evening, where it moves "last 7 days" by its oldest day out of seven --
+    # a window shedding a day still describes the stretch its label names, and
+    # the restore guards against a window collapsing, not against it drifting.
     today = (now or datetime.now()).date()
+    week_start = today - timedelta(days=6)
     candidates = [
         ("session", "Last session",
          index_from(lambda r: r["session_id"] == last_session)),
@@ -195,8 +206,8 @@ def periods(conn: sqlite3.Connection, hero: str,
          index_from(lambda r: datetime.fromisoformat(r["played_at"]).date()
                     == today)),
         ("week", "Last 7 days",
-         index_from(lambda r: datetime.fromisoformat(r["played_at"])
-                    >= last_t - timedelta(days=7))),
+         index_from(lambda r: datetime.fromisoformat(r["played_at"]).date()
+                    >= week_start)),
     ]
     for n in last_n:
         candidates.append((f"n{n}", f"Last {n:,} hands",

@@ -1232,6 +1232,92 @@ class TestTodayIsACalendarDay(unittest.TestCase):
             "SELECT session_id FROM hands")}), 1)
 
 
+class TestLastSevenDaysIsOnTheClock(unittest.TestCase):
+    """"Last 7 days" counts back from today, not from the last hand played.
+
+    It had the same bug "Today" did and wore it more quietly: anchored on the
+    last hand, it meant "the week around whenever I last sat down", so after a
+    month away it would offer a stale fortnight-old window under a label that
+    says the last seven days. Anchored on the clock it either says what it
+    means or is not offered.
+
+    Seven calendar days, not a rolling 168 hours: today and the six before it,
+    so the window moves at midnight and nowhere else.
+    """
+
+    HERO = "Btn"
+    NOW = datetime(2026, 9, 3, 12, 0)
+    # today - 6. A hand on this date is inside the window and one the day
+    # before is not, which is the whole of what "7 days" has to pin down.
+    EDGE = "2026-08-28"
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(self.conn, hand, str(path))
+        # The dates have to land on the hero's own cash hands, since those are
+        # the only ones a period counts: one old, then the two days that
+        # straddle the boundary, then a stretch inside it.
+        hero_cash = self.conn.execute(
+            f"""SELECT h.hand_id FROM hands h
+                  JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+                 WHERE {stats.CASH_ONLY} ORDER BY h.played_at, h.hand_id""",
+            (self.HERO,)).fetchall()
+        self.assertGreaterEqual(len(hero_cash), 5, "fixtures for this test")
+        stamps = ["2026-08-20 19:00:00", "2026-08-27 19:00:00",
+                  f"{self.EDGE} 19:00:00", "2026-09-01 19:00:00"]
+        stamps += [f"2026-09-03 11:{i:02d}:00"
+                   for i in range(len(hero_cash) - len(stamps))]
+        for r, stamp in zip(hero_cash, stamps):
+            self.conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
+                              (stamp, r["hand_id"]))
+        # Everything else is parked alongside the recent stretch, where it
+        # cannot invent a session boundary between the hands that matter.
+        self.conn.execute(
+            f"""UPDATE hands SET played_at = '2026-09-03 11:30:00'
+                 WHERE hand_id NOT IN ({','.join(str(r['hand_id']) for r in hero_cash)})""")
+        db.assign_sessions(self.conn)
+        derive.rebuild(self.conn)
+
+    def _period(self, key, now=None):
+        return next((p for p in stats.periods(self.conn, self.HERO,
+                                              now=now or self.NOW)
+                     if p.key == key), None)
+
+    def _hero_hands_since(self, date):
+        """Hero cash hands on or after a date -- the two filters periods uses."""
+        return self.conn.execute(
+            f"""SELECT COUNT(*) n FROM hands h
+                  JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+                 WHERE h.played_at >= ? AND {stats.CASH_ONLY}""",
+            (self.HERO, date)).fetchone()["n"]
+
+    def test_the_window_is_today_and_the_six_days_before_it(self):
+        week = self._period("week")
+        self.assertIsNotNone(week, "recent hands should put it on offer")
+        self.assertEqual(week.selected.hands, self._hero_hands_since(self.EDGE))
+
+    def test_the_day_before_the_edge_is_outside_it(self):
+        week = self._period("week")
+        self.assertGreater(week.prior.hands, 0)
+        self.assertLess(week.selected.hands, self._hero_hands_since("2026-08-27"))
+
+    def test_a_quiet_fortnight_retires_the_option(self):
+        """Where anchoring on the last hand would keep offering that week."""
+        self.assertIsNone(self._period("week", now=datetime(2026, 9, 24, 12, 0)))
+
+    def test_the_history_based_options_do_not_move_with_the_clock(self):
+        """Only the two calendar labels answer to it."""
+        def keys(now):
+            return [p.key for p in stats.periods(self.conn, self.HERO, now=now)]
+        moved = set(keys(self.NOW)) ^ set(keys(datetime(2026, 9, 24, 12, 0)))
+        self.assertTrue(moved <= {"today", "week"}, moved)
+        self.assertIn("session", keys(datetime(2026, 9, 24, 12, 0)))
+
+
 class TestTournamentsExcluded(unittest.TestCase):
     """Tournament hands are imported, then ignored by every cash figure.
 

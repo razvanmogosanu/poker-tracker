@@ -295,15 +295,20 @@ Multi-tabling puts several hands on the same second, and a tie broken
 arbitrarily would let one hand fall into both the selected window and the prior
 one, which would break exactly that partition property.
 
-**"Today" is the only option anchored on the clock**, and `periods()` takes a
-`now` so that is testable. Every other option describes a position in the
-history and stays true of the same hands however long ago they were played;
-"today" is a claim about the date, so anchoring it on the last hand -- which is
-what it did first -- hangs the label on yesterday's play the moment a day is
-skipped, and it shipped reading "Today &middot; 2,142 hands" on a day with none.
-Disappearing on such a day is the honest answer, and the empty-option rule
-below already does it. `played_at` is the history's local timestamp, so it
-compares against the local clock without conversion.
+**"Today" and "Last 7 days" are anchored on the clock; every other option is
+anchored in the history**, and `periods()` takes a `now` so that is testable.
+"Last session" and "last 500 hands" stay true of the same hands however long
+ago they were played, but those two make a claim about the calendar, and
+anchoring them on the last hand -- which both did first -- hangs the label on
+whenever you last happened to play. "Today" shipped reading "Today &middot;
+2,142 hands" on a day with none in it; "last 7 days" had the same bug more
+quietly, meaning the week around a session from a month ago. Both are whole
+calendar days rather than rolling multiples of 24 hours, so they move at
+midnight and nowhere else, and "7 days" is today plus the six before it. Going
+empty is the honest answer and the empty-option rule below already does it --
+often for "today", rarely for "last 7 days", which is the difference between
+the labels rather than a flaw in either. `played_at` is the history's local
+timestamp, so it compares against the local clock without conversion.
 
 Options that are empty, that cover the whole history, or that start at the same
 hand as an option already offered are dropped — after one evening, "last
@@ -343,7 +348,10 @@ read for the 3 just dealt with the same button lit. The stored
 `hand_index_range` start is the discriminator: new hands extend the window's
 end, so it moves only when the boundary itself jumped, and that is the case
 that falls back to "All". The sliding keys get no such check, because their
-start drifts on every import by design. A
+start drifts on every import by design. "Last 7 days" moves at midnight too
+but is not in `JUMPY`: it sheds its oldest day out of seven and still
+describes the stretch its label names, and the check is there to catch a
+window collapsing, not one drifting. A
 key can also vanish outright — `periods()` drops options as the history grows
 — so a restore always checks that fragments exist behind it, and a key that is
 rejected for either reason is cleared rather than kept, or the next reload
