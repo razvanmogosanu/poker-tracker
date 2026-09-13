@@ -141,7 +141,7 @@ def periods(conn: sqlite3.Connection, hero: str,
     An option is dropped when it is empty, when it covers the whole history
     (in which case it is just "All" under another name), and when it starts at
     the same hand as an option already offered -- for a player with one evening
-    of hands, "last session", "last 24 hours" and "last 7 days" are the same
+    of hands, "last session", "today" and "last 7 days" are the same
     set, and offering three buttons that do the same thing is worse than one.
     """
     rows = conn.execute(
@@ -170,12 +170,20 @@ def periods(conn: sqlite3.Connection, hero: str,
             i -= 1
         return i if i < total else None
 
+    # "Today" is the calendar day the last hand falls on, not a rolling 24
+    # hours back from it, and it is anchored on that hand rather than on the
+    # clock for the same reason every other option here is: a period that went
+    # empty overnight would be dropped, and the reader opening the report on
+    # Sunday morning wants Saturday's session, not a button that has vanished.
+    # It is the one option whose boundary can jump rather than slide -- playing
+    # through midnight moves it by a whole evening -- which is why the report's
+    # reload restore checks its band, exactly as it does for "Last session".
     candidates = [
         ("session", "Last session",
          index_from(lambda r: r["session_id"] == last_session)),
-        ("day", "Last 24 hours",
-         index_from(lambda r: datetime.fromisoformat(r["played_at"])
-                    >= last_t - timedelta(days=1))),
+        ("today", "Today",
+         index_from(lambda r: datetime.fromisoformat(r["played_at"]).date()
+                    == last_t.date())),
         ("week", "Last 7 days",
          index_from(lambda r: datetime.fromisoformat(r["played_at"])
                     >= last_t - timedelta(days=7))),

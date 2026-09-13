@@ -291,7 +291,9 @@ JS = """
   // the selected period in the context of the whole history rather than alone.
   let PERIOD = 'all';
   // Keys shared with LIVE_JS, which runs in its own scope in the same script.
-  const PKEY = 'pt-period', SKEY = 'pt-session-start', RELOADED = 'pt-reloaded';
+  const PKEY = 'pt-period', SKEY = 'pt-jumpy-starts', RELOADED = 'pt-reloaded';
+  // The period keys whose boundary jumps rather than slides; see the restore.
+  const JUMPY = ['session', 'today'];
   let BANDS = {};
   let RAWS = {};
   const listeners = [];
@@ -611,24 +613,26 @@ JS = """
     // history grows. A key with no fragments behind it would swap in nothing.
     if (want && !D.regions[want]) want = null;
 
-    // "Last session" is the one key that can survive a reload and mean
-    // something else. The others slide -- "last 24 hours" is still the last 24
-    // hours after two more hands -- but a 30-minute gap makes "last session" a
-    // different session, and restoring it would quietly swap the 400 hands
-    // being read for the 3 that have just been dealt, with the same button
-    // lit. The band's start index is where the window begins in the hand
-    // sequence: new hands extend the end, so it only moves when the session
-    // actually rolled over, and that is the case that falls back to "All".
-    if (want === 'session') {
-      let was = null;
-      try { was = sessionStorage.getItem(SKEY); } catch (e) {}
-      const now = BANDS.session ? String(BANDS.session[0]) : null;
-      if (was === null || now === null || was !== now) want = null;
+    // Two keys can survive a reload and mean something else. Most of them
+    // slide -- "last 7 days" is still the last 7 days after two more hands --
+    // but a 30-minute gap makes "Last session" a different session, and
+    // midnight does the same to "Today" in the middle of a session that is
+    // still going. Either would quietly swap the 400 hands being read for the
+    // 3 just dealt, with the same button lit.
+    //
+    // The band's start index is where the window begins in the hand sequence,
+    // so it is the discriminator: new hands extend the end, and the start
+    // moves only when the boundary itself jumped. The sliding keys get no such
+    // check, because their start drifts on every import by design and checking
+    // it would reject them always.
+    const starts = {};
+    JUMPY.forEach(function (k) { if (BANDS[k]) starts[k] = BANDS[k][0]; });
+    if (want && JUMPY.indexOf(want) !== -1) {
+      let was = {};
+      try { was = JSON.parse(sessionStorage.getItem(SKEY) || '{}'); } catch (e) {}
+      if (!(want in starts) || was[want] !== starts[want]) want = null;
     }
-    try {
-      if (BANDS.session) sessionStorage.setItem(SKEY, String(BANDS.session[0]));
-      else sessionStorage.removeItem(SKEY);
-    } catch (e) {}
+    try { sessionStorage.setItem(SKEY, JSON.stringify(starts)); } catch (e) {}
 
     if (want && want !== 'all') {
       applyPeriod(want);

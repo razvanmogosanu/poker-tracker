@@ -1147,6 +1147,71 @@ class TestPeriodFilters(unittest.TestCase):
                 self.assertAlmostEqual(c["per100"], 100.0 * c["num"] / c["den"])
 
 
+class TestTodayIsACalendarDay(unittest.TestCase):
+    """"Today" is the last hand's date, not a rolling 24 hours back from it.
+
+    The distinction is invisible on most histories and decisive on the one
+    that matters: a session played through midnight. A rolling window would
+    keep the whole evening under a button labelled "Today"; the calendar day
+    keeps only the hands dealt after midnight, which is what the label claims.
+    That is also what makes it a boundary that jumps rather than slides, and
+    the reason the report's reload restore checks its band.
+    """
+
+    HERO = "Btn"
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for path in sorted(FIXTURES.glob("*.txt")):
+            for hand in parse_file(path):
+                db.insert_hand(self.conn, hand, str(path))
+        rows = self.conn.execute(
+            "SELECT hand_id FROM hands ORDER BY played_at, hand_id").fetchall()
+        # One unbroken sitting that crosses midnight: every hand is within 24
+        # hours of the last, and the last two are on the following date.
+        self.after_midnight = 2
+        stamps = [f"2026-09-03 23:{40 + i:02d}:00"
+                  for i in range(len(rows) - self.after_midnight)]
+        stamps += [f"2026-09-04 00:{10 + i:02d}:00"
+                   for i in range(self.after_midnight)]
+        for r, stamp in zip(rows, stamps):
+            self.conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
+                              (stamp, r["hand_id"]))
+        db.assign_sessions(self.conn)
+        derive.rebuild(self.conn)
+        # Periods count the hero's cash hands, and the hero sits in neither
+        # every fixture nor every cash game, so the expectation is counted
+        # under the same two filters rather than assumed from the stamps.
+        self.hero_after_midnight = self.conn.execute(
+            f"""SELECT COUNT(*) n FROM hands h
+                  JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+                 WHERE h.played_at >= '2026-09-04' AND {stats.CASH_ONLY}""",
+            (self.HERO,)).fetchone()["n"]
+        self.assertGreater(self.hero_after_midnight, 0)
+
+    def _period(self, key):
+        return next((p for p in stats.periods(self.conn, self.HERO)
+                     if p.key == key), None)
+
+    def test_today_stops_at_midnight_rather_than_24_hours_back(self):
+        today = self._period("today")
+        self.assertIsNotNone(today, "the hands after midnight should be offered")
+        self.assertEqual(today.selected.hands, self.hero_after_midnight)
+
+    def test_the_evening_before_is_prior_even_though_it_is_minutes_away(self):
+        today = self._period("today")
+        self.assertGreater(today.prior.hands, 0)
+        self.assertEqual(today.selected.hands + today.prior.hands,
+                         self._period("all").selected.hands)
+
+    def test_the_sitting_is_still_one_session_across_the_boundary(self):
+        """Which is the whole reason "Today" and "Last session" can disagree."""
+        self.assertEqual(len({r["session_id"] for r in self.conn.execute(
+            "SELECT session_id FROM hands")}), 1)
+
+
 class TestTournamentsExcluded(unittest.TestCase):
     """Tournament hands are imported, then ignored by every cash figure.
 
