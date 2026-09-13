@@ -290,6 +290,8 @@ JS = """
   // the heatmap instead redraw from data they already hold, because they show
   // the selected period in the context of the whole history rather than alone.
   let PERIOD = 'all';
+  // Keys shared with LIVE_JS, which runs in its own scope in the same script.
+  const PKEY = 'pt-period', SKEY = 'pt-session-start', RELOADED = 'pt-reloaded';
   let BANDS = {};
   let RAWS = {};
   const listeners = [];
@@ -568,6 +570,9 @@ JS = """
 
     function applyPeriod(key) {
       PERIOD = key;
+      // Remembered only so an auto-reload can put it back; see the restore
+      // below for why that is not the same thing as defaulting to it.
+      try { sessionStorage.setItem(PKEY, key); } catch (e) {}
       const regions = D.regions[key] || {};
       Object.keys(regions).forEach(function (id) {
         const el = document.getElementById(id);
@@ -583,11 +588,57 @@ JS = """
     $$('.period-bar .chip').forEach(function (b) {
       b.addEventListener('click', function () { applyPeriod(b.dataset.period); });
     });
-    // Deliberately not restored from storage and never defaulted to anything
-    // but "All": the pull with a period filter is to open the report after
-    // every session and read today's win rate, which is a number with a
-    // +/-150 bb/100 interval on it.
-    listeners.forEach(function (fn) { fn(); });
+
+    // Restored across the live page's own reload, and across nothing else.
+    // Opening report.html, or reloading it by hand, still lands on "All": the
+    // pull with a period filter is to open the report after every session and
+    // read today's win rate, which is a number with a +/-150 bb/100 interval
+    // on it. Carrying an explicit click through a reload the reader did not
+    // ask for is the opposite of that -- the filter was chosen, and new hands
+    // arriving is not a reason to throw the choice away.
+    //
+    // The reload flag is what separates the two, and LIVE_JS sets it only on
+    // the path that calls location.reload().
+    let want = null;
+    try {
+      if (sessionStorage.getItem(RELOADED) !== null) want = sessionStorage.getItem(PKEY);
+      sessionStorage.removeItem(RELOADED);
+    } catch (e) {}
+
+    // An option can vanish between renders: periods() drops the ones that are
+    // empty, that cover the whole history, or that start where an option
+    // already offered starts, so "Last session" appears and disappears as the
+    // history grows. A key with no fragments behind it would swap in nothing.
+    if (want && !D.regions[want]) want = null;
+
+    // "Last session" is the one key that can survive a reload and mean
+    // something else. The others slide -- "last 24 hours" is still the last 24
+    // hours after two more hands -- but a 30-minute gap makes "last session" a
+    // different session, and restoring it would quietly swap the 400 hands
+    // being read for the 3 that have just been dealt, with the same button
+    // lit. The band's start index is where the window begins in the hand
+    // sequence: new hands extend the end, so it only moves when the session
+    // actually rolled over, and that is the case that falls back to "All".
+    if (want === 'session') {
+      let was = null;
+      try { was = sessionStorage.getItem(SKEY); } catch (e) {}
+      const now = BANDS.session ? String(BANDS.session[0]) : null;
+      if (was === null || now === null || was !== now) want = null;
+    }
+    try {
+      if (BANDS.session) sessionStorage.setItem(SKEY, String(BANDS.session[0]));
+      else sessionStorage.removeItem(SKEY);
+    } catch (e) {}
+
+    if (want && want !== 'all') {
+      applyPeriod(want);
+    } else {
+      // A rejected key is forgotten, not kept: having fallen back to "All",
+      // the next reload must not jump back to a filter the reader is no
+      // longer looking at.
+      try { sessionStorage.removeItem(PKEY); } catch (e) {}
+      listeners.forEach(function (fn) { fn(); });
+    }
   }
 
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
@@ -602,6 +653,7 @@ LIVE_JS = """
   const status = document.getElementById('refresh-status');
   if (!status) return;
   const SCROLL = 'pt-scroll';
+  const RELOADED = 'pt-reloaded';
   const EVERY = 60000;
 
   // A reload would otherwise throw the reader back to the top of the page.
@@ -653,7 +705,10 @@ LIVE_JS = """
         return;
       }
       status.textContent = '+' + d.new_hands + ' hands, reloading';
+      // Both are read once on the way back and cleared, so only the reload
+      // this line is about restores anything.
       sessionStorage.setItem(SCROLL, String(window.scrollY));
+      sessionStorage.setItem(RELOADED, '1');
       location.reload();
     } catch (e) {
       busy = false;

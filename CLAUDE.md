@@ -319,6 +319,23 @@ argues. Its denominator is the no-pair hands with postflop money in them, not
 every no-pair hand: an ace-high that was checked down cost nothing and broke no
 rule, and counting it would dilute the only figure the check exists to report.
 
+**The one reload that carries the filter is the live page's own.** A period
+survives `serve.py`'s auto-reload and nothing else: opening `report.html`, or
+reloading by hand, still lands on "All", because `LIVE_JS` sets the
+`pt-reloaded` flag only on the path that calls `location.reload()` and the flag
+is consumed on the way back. New hands arriving is not the reader asking to
+lose a filter they chose. **"Last session" is the exception and needs its band
+checked.** The other keys slide — "last 24 hours" is still the last 24 hours
+after two more hands — but a 30-minute gap makes "last session" a *different*
+session, so restoring the key would swap the 400 hands being read for the 3
+just dealt with the same button lit. The stored `hand_index_range` start is the
+discriminator: new hands extend the window's end, so it moves only when the
+session actually rolled over, and that is the case that falls back to "All". A
+key can also vanish outright — `periods()` drops options as the history grows
+— so a restore always checks that fragments exist behind it, and a key that is
+rejected for either reason is cleared rather than kept, or the next reload
+would jump back to a filter the reader is no longer looking at.
+
 ## Report
 
 `report.build(conn, hero, live=False)`. `live=True` adds the refresh toolbar and
