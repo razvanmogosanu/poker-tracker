@@ -571,10 +571,15 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
     drawing = by_k.get(handclass.NO_PAIR_DRAW)
     naked_n = naked["n"] if naked else 0
     draw_n = drawing["n"] if drawing else 0
+    # Either bucket can be missing from the GROUP BY -- a short window often has
+    # only one of the two -- so read the money through the same guard as the
+    # count rather than off the row.
+    naked_bb = (naked["net"] if naked else 0.0) or 0.0
+    draw_bb = (drawing["net"] if drawing else 0.0) or 0.0
     naked_note = (
-        f"{naked_n} of them cost {naked['net'] or 0.0:+,.0f} bb; the "
+        f"{naked_n} of them cost {naked_bb:+,.0f} bb; the "
         f"{draw_n} with {handclass.DRAW_OUTS}+ outs, "
-        f"{(drawing['net'] if drawing else 0.0) or 0.0:+,.0f} bb."
+        f"{draw_bb:+,.0f} bb."
         if naked_n or draw_n else
         "No postflop money has gone in with no pair yet."
     )

@@ -783,6 +783,27 @@ class TestHandClassInTheDatabase(unittest.TestCase):
         # than passing or failing; a thin one still says so.
         self.assertIn(check["status"], ("watch", "thin"))
 
+    def test_the_eight_outs_note_survives_a_bucket_with_no_hands_in_it(self):
+        """Either half of the no-pair split can be missing from the GROUP BY.
+
+        A window narrow enough to hold drawing hands but no naked ones -- a
+        single evening, which is what the period filter is for -- returns one
+        row, and reading the other half's money off a row that is not there
+        took the whole report down.
+        """
+        for klass in (handclass.NO_PAIR, handclass.NO_PAIR_DRAW):
+            with self.subTest(only=klass):
+                self.conn.execute(
+                    "UPDATE hand_player SET hand_class = ? "
+                    "WHERE player = 'Insurer' AND postflop_invested > 0", (klass,))
+                try:
+                    check = next(c for c in stats.compliance(self.conn, "Insurer")
+                                 if str(handclass.DRAW_OUTS) in c["name"])
+                    self.assertEqual(check["den"], 2)
+                    self.assertIn("bb", check["note"])
+                finally:
+                    self.conn.rollback()
+
     def test_the_street_split_adds_back_to_the_row_it_breaks_down(self):
         """The whole reason preflop is a row: the column has to reconcile.
 
