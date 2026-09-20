@@ -9,3 +9,7 @@ __pycache__/
 *.py[cod]
 
 .claude/settings.local.json
+
+# Worktrees created by Claude Code sessions: scratch checkouts of this same
+# repository, not content of it.
+.claude/worktrees/
