@@ -134,6 +134,52 @@ def _before(boundary) -> tuple[str, tuple]:
     return ("(h.played_at, h.hand_id) < (?, ?)", boundary)
 
 
+def last_hand(conn: sqlite3.Connection, hero: str) -> tuple[str, int] | None:
+    """The hero's most recent cash hand, as a (played_at, hand_id) boundary.
+
+    The pair rather than the timestamp alone, for the same reason `periods()`
+    orders on both: multi-tabling puts several hands on one second.
+    """
+    row = conn.execute(
+        f"""SELECT h.played_at, h.hand_id
+            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+            WHERE {CASH_ONLY}
+            ORDER BY h.played_at DESC, h.hand_id DESC LIMIT 1""",
+        (hero,),
+    ).fetchone()
+    return (row["played_at"], row["hand_id"]) if row else None
+
+
+def _after(boundary) -> tuple[str, tuple]:
+    return ("(h.played_at, h.hand_id) > (?, ?)", boundary)
+
+
+def window_after(conn: sqlite3.Connection, hero: str, boundary,
+                 label: str = "Since") -> Window:
+    """Everything played strictly after a boundary hand.
+
+    `periods()` builds the windows a reader can select, anchored on the first
+    hand *inside* the window; this builds one around a boundary somebody else
+    is holding on to, and that boundary is the last hand they had already
+    seen. Hence `>` and not `>=`: the review journal stamps a finding with the
+    latest hand at the time, and that hand is one of the ones the finding was
+    made about. Counting it again on the other side would put a decision being
+    corrected inside the window measuring the correction.
+
+    The distinction hardly moves a rate over three thousand hands, but the
+    whole reason the journal stores a boundary is that the two windows must
+    not overlap, and a boundary that is off by one hand is not a boundary.
+    """
+    sql, params = _after(tuple(boundary))
+    row = conn.execute(
+        f"""SELECT COUNT(*) n
+            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+            WHERE {CASH_ONLY} AND ({sql})""",
+        (hero, *params),
+    ).fetchone()
+    return Window(label, sql, tuple(params), row["n"] or 0)
+
+
 def periods(conn: sqlite3.Connection, hero: str,
             last_n: tuple[int, ...] = LAST_N_HANDS,
             now: "datetime | None" = None) -> list[Period]:
@@ -521,20 +567,20 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
     ).fetchone()
     n = row["hands"] or 0
 
-    def count_check(name, num, target, note):
+    def count_check(key, name, num, target, note):
         # A count check has an opinion at any n: one small-blind cold call is
         # one deviation whether it happened in 80 hands or 8,000. What n
         # changes is only how much a zero is worth, which the rate per 100
         # carries instead of a pill.
         num = num or 0
-        return {"name": name, "kind": "count", "num": num, "den": n,
+        return {"key": key, "name": name, "kind": "count", "num": num, "den": n,
                 "value": float(num),
                 "per100": 100.0 * num / n if n else None,
                 "target": target,
                 "status": "thin" if not n else ("ok" if num == 0 else "off"),
                 "note": note}
 
-    def rate_check(name, num, den, target, lo, hi, note):
+    def rate_check(key, name, num, den, target, lo, hi, note):
         num, den = num or 0, den or 0
         pct = 100.0 * num / den if den else None
         if den < MIN_OPPS:
@@ -543,7 +589,7 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
             status = "watch"
         else:
             status = "ok" if lo <= pct <= hi else "off"
-        return {"name": name, "kind": "rate", "num": num, "den": den,
+        return {"key": key, "name": name, "kind": "rate", "num": num, "den": den,
                 "value": pct, "per100": None, "target": target,
                 "status": status, "note": note}
 
@@ -584,16 +630,24 @@ def compliance(conn, hero, window: Window | None = None) -> list[dict]:
         "No postflop money has gone in with no pair yet."
     )
 
+    # `key` is the stable identifier; `name` is prose for a human to read. They
+    # are separate because a finding in the review journal points at a check by
+    # key and has to keep pointing at the same check months later -- the names
+    # here are sentences, and the 8-outs one interpolates a constant, so
+    # rewording one would silently orphan whatever was tracked against it.
     return [
-        count_check("SB cold calls", row["sb_cc"], "0",
+        count_check("sb-coldcall", "SB cold calls", row["sb_cc"], "0",
                     "Any non-zero value is a deviation from a raise-or-fold SB."),
-        count_check("SB completes (limp)", row["sb_comp"], "0",
+        count_check("sb-complete", "SB completes (limp)", row["sb_comp"], "0",
                     "Completing the small blind is VPIP but not PFR."),
-        rate_check("BTN open when folded to", row["btn_open"], row["btn_open_opp"],
+        rate_check("btn-open", "BTN open when folded to",
+                   row["btn_open"], row["btn_open_opp"],
                    "~45%", 38, 52, "Opens divided by opportunities on the button."),
-        rate_check(f"Postflop money in below {handclass.DRAW_OUTS} outs",
+        rate_check("naked-continues",
+                   f"Postflop money in below {handclass.DRAW_OUTS} outs",
                    naked_n, naked_n + draw_n, "low", None, None, naked_note),
-        rate_check("Hands below 80bb effective", row["short"], n, "low", None, None,
+        rate_check("short-stacks", "Hands below 80bb effective",
+                   row["short"], n, "low", None, None,
                    f"Mean effective stack {row['avg_eff']:.1f}bb."
                    if row["avg_eff"] is not None else ""),
     ]

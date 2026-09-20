@@ -6,10 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import db, derive, handclass, stats
+from . import brief, db, derive, handclass, review, stats
 
 DEFAULT_ROOT = Path.home() / "AppData/Local/PokerStars.RO/HandHistory"
 DEFAULT_DB = Path(__file__).resolve().parents[1] / "poker.db"
+DEFAULT_JOURNAL = review.DEFAULT_JOURNAL
 
 
 def cmd_import(args) -> int:
@@ -292,6 +293,212 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    """The whole dashboard as JSON, for a reader that wants the numbers."""
+    import json
+
+    conn = db.connect(args.db)
+    hero = args.hero or db.detect_hero(conn)
+    if not hero:
+        print("no hands imported yet", file=sys.stderr)
+        return 1
+    tracked = None
+    if Path(args.journal).exists():
+        tracked = review.status(conn, hero, args.journal)
+    try:
+        payload = brief.build(conn, hero, args.period, grid=args.grid,
+                              tracked=tracked)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    text = json.dumps(payload, indent=2, default=str)
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"wrote {args.output}  ({len(text) // 1024} KB)")
+    else:
+        print(text)
+    return 0
+
+
+def _fmt_value(v, unit: str) -> str:
+    if v is None:
+        return "-"
+    return f"{v:.1f}%" if unit == "%" else f"{v:+.2f} {unit}".strip()
+
+
+def cmd_review_add(args) -> int:
+    conn = db.connect(args.db)
+    hero = args.hero or db.detect_hero(conn)
+    rec = review.add(conn, hero, args.title, args.metric,
+                     args.target, args.note, args.journal)
+    print(f"{rec['id']}  {rec['title']}")
+    print(f"  {rec['metric']} = {_fmt_value(rec['value_at_open'], rec['unit'])}"
+          f"  (n={rec['den_at_open']:.0f})"
+          + (f"  target {rec['target']}" if rec["target"] else "  no target band"))
+    print(f"  measured from the next hand on; {args.journal}")
+    return 0
+
+
+def cmd_review_list(args) -> int:
+    rows = review.load(args.journal)
+    if not args.all:
+        rows = [r for r in rows if r["status"] == "open"]
+    if not rows:
+        print("no findings recorded yet")
+        return 0
+    for r in rows:
+        mark = "  " if r["status"] == "open" else "x "
+        print(f"{mark}{r['id']:<14}{r['metric']:<28}{r['title']}")
+        if r["note"]:
+            print(f"      {r['note']}")
+    return 0
+
+
+def cmd_review_status(args) -> int:
+    """Every open finding, re-measured over the hands played since it was made."""
+    conn = db.connect(args.db)
+    hero = args.hero or db.detect_hero(conn)
+    rows = review.status(conn, hero, args.journal, args.all)
+    if not rows:
+        print("no open findings; record one with `review add`")
+        return 0
+    marks = {"ok": "ok ", "off": "!! ", "watch": "   ", "thin": " ? "}
+    for r in rows:
+        print(f"\n{r['id']}  {r['title']}")
+        if "error" in r:
+            print(f"  ! {r['error']}")
+            continue
+        unit = r["unit"]
+        print(f"  {marks[r['verdict']]}{r['metric']:<26}"
+              f"{_fmt_value(r['then']['value'], unit):>14} -> "
+              f"{_fmt_value(r['now']['value'], unit):>14}"
+              f"   n={r['now']['den']:.0f} over {r['hands_since']} hands since")
+        if r["verdict"] == "thin":
+            # Not a soft failure: the hands played since cannot answer the
+            # question, which is a different statement from "no better".
+            print(f"      too few opportunities yet "
+                  f"(need {stats.MIN_OPPS}) -- no verdict")
+        elif r["moved"]:
+            print(f"      target {r['target'] or '(none)'} -- {r['verdict']},"
+                  f" moved {r['moved']}")
+        if r["note"]:
+            print(f"      {r['note']}")
+    print()
+    return 0
+
+
+def cmd_review_close(args) -> int:
+    rec = review.close(args.id, args.note, args.journal)
+    print(f"closed {rec['id']}")
+    return 0
+
+
+def _hand_filter(metric: str) -> tuple[str, list]:
+    """The WHERE fragment selecting the hands a metric is measured over.
+
+    Reuses the metric namespace so a drill-down or a quiz lands on exactly the
+    spots a tracked finding names, rather than on a hand-written query that
+    can quietly disagree with the rate it is supposed to illustrate.
+    """
+    from . import handclass as hc
+
+    kind, _, rest = metric.partition(":")
+    if kind == "stat":
+        defs = {num: den for defs_ in (stats.PREFLOP_DEFS, stats.POSTFLOP_DEFS)
+                for _lbl, num, den in defs_}
+        if rest not in defs:
+            raise brief.UnknownMetric(f"unknown stat {rest!r}")
+        den = defs[rest]
+        return ("1=1" if den == "1" else f"hp.{den} = 1", [])
+    if kind == "class":
+        bucket, _, rng = rest.partition("@")
+        if bucket not in hc.CLASSES:
+            raise brief.UnknownMetric(f"unknown hand class {bucket!r}")
+        lo, hi = brief.parse_pot_range(rng)
+        sql = ["hp.hand_class = ?", "h.total_pot * 1.0 / h.bb >= ?"]
+        params = [bucket, lo]
+        if hi is not None:
+            sql.append("h.total_pot * 1.0 / h.bb < ?")
+            params.append(hi)
+        return (" AND ".join(sql), params)
+    raise brief.UnknownMetric(
+        f"cannot select hands for {metric!r}; `hands` takes a stat: or class: "
+        f"metric (a compliance check is a rule, not a set of spots)")
+
+
+def cmd_hands(args) -> int:
+    """Real hands matching a metric -- the raw material for a drill-down."""
+    conn = db.connect(args.db)
+    hero = args.hero or db.detect_hero(conn)
+    try:
+        where, params = _hand_filter(args.metric)
+    except brief.UnknownMetric as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    if args.matched or args.unmatched:
+        flag = args.metric.partition(":")[2]
+        where += f" AND hp.{flag} = {1 if args.matched else 0}"
+    if args.invested:
+        where += " AND hp.postflop_invested > 0"
+
+    period = None
+    if args.period != "all":
+        available = stats.periods(conn, hero)
+        sel = next((x for x in available if x.key == args.period), None)
+        if sel is None:
+            print(f"unknown period {args.period!r}", file=sys.stderr)
+            return 1
+        period = sel.selected
+    wsql, wp = (stats.CASH_ONLY, ()) if period is None else (
+        f"{stats.CASH_ONLY} AND ({period.sql})", period.params)
+
+    rows = conn.execute(
+        f"""SELECT h.hand_id, h.site_hand_no, h.played_at, hp.position,
+                   s.hole_cards, hp.hand_class,
+                   h.total_pot * 1.0 / h.bb AS pot_bb,
+                   r.net * 1.0 / h.bb       AS net_bb
+            FROM hand_player hp
+            JOIN hands h      ON h.hand_id = hp.hand_id
+            JOIN results r    ON r.hand_id = hp.hand_id AND r.player = hp.player
+            LEFT JOIN seats s ON s.hand_id = hp.hand_id AND s.player = hp.player
+            WHERE hp.player = ? AND {where} AND {wsql}
+            ORDER BY h.played_at DESC, h.hand_id DESC
+            LIMIT ?""",
+        (hero, *params, *wp, args.limit),
+    ).fetchall()
+
+    if not rows:
+        print("no hands match")
+        return 0
+    for r in rows:
+        print(f"#{r['site_hand_no']:<13}{r['played_at'][:16]}  "
+              f"{r['position'] or '--':<4}{r['hole_cards'] or '--':<8}"
+              f"{r['hand_class'] or '':<12}pot {r['pot_bb']:6.1f}  "
+              f"{r['net_bb']:+8.1f}bb")
+
+    if args.text:
+        # `db.hand_texts` re-reads and re-splits the source files, which is
+        # only worth doing for a handful of hands -- never over a result set.
+        if len(rows) > MAX_TEXT_HANDS:
+            print(f"\nrefusing to print text for {len(rows)} hands; "
+                  f"use --limit {MAX_TEXT_HANDS} or fewer", file=sys.stderr)
+            return 1
+        texts = db.hand_texts(conn, [r["hand_id"] for r in rows])
+        for r in rows:
+            print("\n" + "=" * 68)
+            body = texts.get(r["hand_id"])
+            print(body if body else
+                  f"(#{r['site_hand_no']}: source file has moved, no text)")
+    return 0
+
+
+# The ceiling on `hands --text`, for the reason in db.hand_texts: the raw text
+# is deliberately not stored, so every hand printed is a file read and a
+# re-split.
+MAX_TEXT_HANDS = 25
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="pokertracker", description=__doc__)
     p.add_argument("--db", default=str(DEFAULT_DB), help="sqlite database path")
@@ -336,10 +543,66 @@ def main(argv=None) -> int:
     s.add_argument("-o", "--output", default="report.html")
     s.set_defaults(func=cmd_report)
 
+    s = sub.add_parser("export", help="the whole dashboard as JSON")
+    s.add_argument("--period", default="all")
+    s.add_argument("--grid", action="store_true",
+                   help="include the 169-cell preflop range grid")
+    s.add_argument("--journal", default=str(DEFAULT_JOURNAL))
+    s.add_argument("-o", "--output", default="",
+                   help="write to a file instead of stdout")
+    s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("hands", help="list real hands matching a metric")
+    s.add_argument("--metric", required=True,
+                   help="stat:<flag> or class:<bucket>[@lo-hi]")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--matched", action="store_true",
+                   help="only hands where the stat fired")
+    g.add_argument("--unmatched", action="store_true",
+                   help="only hands where it did not")
+    s.add_argument("--invested", action="store_true",
+                   help="only hands with postflop money in them")
+    s.add_argument("--period", default="all")
+    s.add_argument("--limit", type=int, default=10)
+    s.add_argument("--text", action="store_true",
+                   help="print the original hand history for each")
+    s.set_defaults(func=cmd_hands)
+
+    s = sub.add_parser("review", help="the review journal: findings over time")
+    s.add_argument("--journal", default=str(DEFAULT_JOURNAL))
+    rsub = s.add_subparsers(dest="review_cmd", required=True)
+
+    r = rsub.add_parser("add", help="record a finding and stamp it")
+    r.add_argument("--title", required=True)
+    r.add_argument("--metric", required=True,
+                   help="stat:<flag>, check:<key>, class:<bucket>, money:bb100")
+    r.add_argument("--target", default="",
+                   help="a band: 60, <=60, >=8, 38-52; omit when there is "
+                        "no defensible one")
+    r.add_argument("--note", default="")
+    r.set_defaults(func=cmd_review_add)
+
+    r = rsub.add_parser("list", help="findings on record")
+    r.add_argument("--all", action="store_true", help="include closed ones")
+    r.set_defaults(func=cmd_review_list)
+
+    r = rsub.add_parser("status",
+                        help="re-measure open findings over the hands since")
+    r.add_argument("--all", action="store_true", help="include closed ones")
+    r.set_defaults(func=cmd_review_status)
+
+    r = rsub.add_parser("close", help="mark a finding dealt with")
+    r.add_argument("id")
+    r.add_argument("--note", default="")
+    r.set_defaults(func=cmd_review_close)
+
     args = p.parse_args(argv)
     try:
         return args.func(args)
-    except db.StaleSchema as e:
+    except (db.StaleSchema, review.JournalError, brief.UnknownMetric) as e:
+        # All three say the same kind of thing: what you asked for does not
+        # name anything real. A message beats a traceback, and a non-zero exit
+        # beats a message that scrolls past.
         print(f"error: {e}", file=sys.stderr)
         return 2
 
