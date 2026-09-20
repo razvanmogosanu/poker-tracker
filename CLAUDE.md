@@ -17,6 +17,10 @@ python -m pokertracker.cli stats --problems   # parse failures; see "Problems" b
 python -m pokertracker.cli import --force     # re-read files the mtime check skipped
 python -m pokertracker.cli derive    # rebuild derived stats only (no re-parse)
 
+python -m pokertracker.cli export             # the whole dashboard as JSON
+python -m pokertracker.cli review status      # open findings, re-measured
+python -m pokertracker.cli hands --metric stat:fold_to_3bet --limit 5 --text
+
 python -m unittest discover -s tests                          # all tests (~20s)
 python -m unittest tests.test_tracker                         # one module
 python -m unittest tests.test_tracker.TestPositions           # one class
@@ -129,7 +133,8 @@ in proportion to contribution.
 
 **Schema changes need a DB rebuild.** `db.SCHEMA` uses `CREATE TABLE IF NOT
 EXISTS`, so a new column will not appear in an existing `poker.db`. There are no
-migrations: delete `poker.db` (plus `-wal`/`-shm`) and re-import. Re-parsing is
+migrations: delete `poker.db` (plus `-wal`/`-shm`) and re-import. (This is
+exactly why `reviews.jsonl` is not a table — see "The review journal" below.) Re-parsing is
 fast and the histories are the source of truth. `db.connect()` checks for this
 and raises `StaleSchema` *before* running the schema script, because a stale
 `hands` table makes `SCHEMA`'s own index statements fail with a bare "no such
@@ -209,6 +214,73 @@ filter must not be able to disagree. The scan covers every hand in the database,
 not one hero's, because sitting down is a fact about the clock. Session numbers
 are recomputed across the whole history on every import, since a late-arriving
 file can land between two hands already imported.
+
+## The review journal
+
+`brief.py` renders the whole dashboard as JSON (`cli export`) so a review can
+be held against the database rather than against a screenshot of it, and
+`review.py` keeps a log of what was found. Both exist for one workflow: a
+coaching session run locally, where follow-up questions can be answered by
+querying rather than by re-reading a rendered page.
+
+**`brief.py` derives nothing.** Every figure in the export is a dict some
+function in `stats.py` already returns. A review that wants a number nobody
+computes yet gets it added to `stats.py`, so the report and the brief cannot
+drift into disagreeing about the same quantity — one is what a person reads
+and the other is what advice gets built on, which is the worst possible place
+for a disagreement to hide. There is a test asserting the sections are the
+stats functions verbatim.
+
+**`reviews.jsonl` is deliberately not a table, and this is the whole design.**
+Everything else here is rebuildable from the hand histories, which is why the
+documented cure for a schema change is to delete `poker.db` and re-import. A
+judgement about how somebody is playing cannot be re-derived from the text it
+was made about, so putting it in `poker.db` would mean the next person to add
+a column destroys the entire coaching history by following the instructions.
+It is a git-tracked file at the repo root, and `test_review.py` asserts
+`db.SCHEMA` mentions no such table.
+
+It is a log of events rather than a table of state — `{"op": "open", ...}` and
+`{"op": "close", ...}`, replayed by `review.load()` — for the same reason the
+histories are: a close is a thing that happened on a date, and replaying gives
+both the current status and how it got there. A malformed line is reported,
+not skipped, exactly like the `problems` table.
+
+**A finding names a metric by a stable id, never by a display label.** The ids
+are `stat:<flag>` (the numerator column in `hand_player`), `check:<key>`,
+`class:<bucket>[@lo-hi]` and `money:bb100`. `stats.compliance()` carries a
+`key` slug beside its prose `name` for this: the names there are sentences and
+one of them interpolates `DRAW_OUTS`, so a finding pointing at a check by name
+would be orphaned by a reword. An unresolvable id raises rather than returning
+`None`, because a typo that reads as "no data yet" would fail silently forever.
+
+**Progress is measured over the hands played since the finding, and the
+boundary is exclusive.** `review.add` stamps `stats.last_hand()` — the last
+hand already seen — and `status()` re-measures through `stats.window_after()`,
+which is `>` and not `>=`. Re-measuring a corrected leak across the whole
+history mixes the decisions being corrected back in with the corrections, the
+rate barely moves, and the reader concludes nothing changed when it did; it is
+the same reasoning that makes `Period` pair a selected window with the prior
+one rather than with the total. One hand of overlap hardly moves a rate over
+three thousand, but a boundary that is off by one is not a boundary.
+
+**The verdict vocabulary is `compliance()`'s, and `thin` means what it means
+there.** Below `MIN_OPPS` the hands played since cannot answer the question,
+which is not a softer way of saying "no better" — telling somebody they have
+not improved when they have played forty hands is the one thing this loop must
+never do. `watch` is for a finding with no defensible band, and `review.add`
+accepts an empty `--target` for exactly that case rather than inviting a
+percentage to be invented. `moved` is reported separately from `verdict`,
+because a rate that went 71% → 63% against a 60% band is still off plan *and*
+is also the thing that is working.
+
+`cli hands --metric` selects the real hands behind a `stat:` or `class:`
+metric, so a drill-down lands on the spots a finding names. It refuses a
+`check:` metric — a compliance rule is not a set of spots — and refuses
+`--text` above 25 hands, for the reason in `db.hand_texts`.
+
+The two skills in `.claude/skills/` (`review`, `quiz`) are the interface; they
+hold the guardrails in prose and call nothing that is not listed above.
 
 ## Conventions worth preserving
 

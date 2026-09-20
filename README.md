@@ -52,11 +52,49 @@ Other commands:
 | `ev` | Compute all-in EV only |
 | `report -o out.html` | Write the dashboard only |
 | `serve --port 8765` | Serve the dashboard, refreshing itself every 60s |
+| `export` | The whole dashboard as JSON, for reviewing against the data |
+| `hands --metric stat:fold_to_3bet --text` | The real hands behind a stat |
+| `review add/list/status/close` | The review journal (below) |
 
 Useful flags: `--root` for a different history folder, `--db` for a different
 database, `--hero` to override screen-name detection.
 
 Run the tests with `python -m unittest discover -s tests`.
+
+### Reviewing
+
+The dashboard is for reading while you play. Reviewing is a different job, and
+it happens against the database rather than against the rendered page — so a
+question the report does not already answer ("show me the five hands where I
+did that") can be answered instead of guessed at.
+
+```bash
+python -m pokertracker.cli export -o brief.json   # every figure, as JSON
+python -m pokertracker.cli review status          # what you are working on
+```
+
+`review` keeps a journal of findings in `reviews.jsonl`, next to this README
+and in git — deliberately *not* in `poker.db`, which the instructions above
+tell you to delete whenever the schema changes. A finding names a metric by a
+stable id, stamps what it read at the time, and remembers the last hand you
+had played:
+
+```bash
+python -m pokertracker.cli review add \
+  --title "Folding too much to 3-bets" \
+  --metric stat:fold_to_3bet --target "<=60"
+```
+
+`review status` then re-measures it **over the hands you have played since**,
+never over the whole history — otherwise the decisions you are correcting get
+mixed back in with the corrections, the number barely moves, and it looks like
+nothing changed. Below 30 opportunities the verdict is `thin`, which means the
+hands since cannot answer the question yet; that is not the same statement as
+"no better". Leave `--target` empty when there is no defensible band, and the
+finding is watched rather than judged.
+
+The `/review` and `/quiz` skills in `.claude/skills/` drive all of this from
+Claude Code.
 
 ## How it is put together
 
