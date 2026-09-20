@@ -96,6 +96,10 @@ class Hand:
     cashout_residual: int = 0
     hero: str = ""
     went_to_showdown: bool = False
+    # PokerStars prints `Hand cancelled` when a table empties out between the
+    # blinds going in and the cards coming out. The posts are returned, so it
+    # is not a hand anybody played and it never reaches the database.
+    is_cancelled: bool = False
     seats: list[Seat] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
     results: list[Result] = field(default_factory=list)
@@ -219,6 +223,7 @@ NOISE_FRAGMENTS = (
     # Tournament side prizes -- tickets, seats, entries. They are awarded
     # alongside the pot and are not part of it.
     " wins a ",
+    " wins an entry to tournament ",
 )
 NOISE_PREFIXES = ("Board ", "Hand cancelled", "Total pot ")
 
@@ -230,11 +235,21 @@ def _is_noise(line: str) -> bool:
 # --------------------------------------------------------------------------
 
 
+# Hand histories requested from the client or emailed by support wrap each
+# hand in a numbered banner. It carries no hand state and, unlike chat
+# chatter, it sits *between* hands, so it is dropped at the split rather than
+# treated as noise inside a block -- the banner ahead of the first hand would
+# otherwise open a block of its own with no header in it.
+RE_EXPORT_BANNER = re.compile(r"^\*{3,}\s*#\s*\d+\s*\*{3,}$")
+
+
 def split_hands(text: str) -> list[str]:
     """Split a history file into per-hand text blocks."""
     text = text.replace("\r\n", "\n").replace("﻿", "")
     blocks, cur = [], []
     for line in text.split("\n"):
+        if RE_EXPORT_BANNER.match(line.strip()):
+            continue
         if line.startswith("PokerStars") and " Hand #" in line and cur:
             blocks.append("\n".join(cur))
             cur = [line]
@@ -486,6 +501,10 @@ def parse_hand(block: str, hero_hint: str = "") -> Hand:  # noqa: C901 - a parse
             hand.timeouts.append(RE_TIMEOUT.match(line).group("player"))
             continue
 
+        if line.startswith("Hand cancelled"):
+            hand.is_cancelled = True
+            continue
+
         if _is_noise(line):
             continue
 
@@ -540,7 +559,8 @@ def parse_hand(block: str, hero_hint: str = "") -> Hand:  # noqa: C901 - a parse
 def _check_invariants(hand: Hand, seen_hole_cards: bool) -> None:
     """Arithmetic identities that catch most parser bugs immediately."""
     if not seen_hole_cards:
-        hand.problems.append("no HOLE CARDS marker (cancelled hand?)")
+        if not hand.is_cancelled:
+            hand.problems.append("no HOLE CARDS marker, but no cancellation either")
         return
 
     total_in = sum(r.contributed for r in hand.results)

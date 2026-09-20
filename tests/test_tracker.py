@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pokertracker import charts, db, derive, handclass, report, stats  # noqa: E402
 from pokertracker.cards import parse_cards  # noqa: E402
-from pokertracker.parser import parse_file, parse_money  # noqa: E402
+from pokertracker.parser import parse_file, parse_money, split_hands  # noqa: E402
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -121,6 +122,11 @@ class TestParserInvariants(unittest.TestCase):
         for name in self.FIXTURE_NAMES:
             with self.subTest(fixture=name):
                 hand = load(name)
+                # A cancelled hand's posts are returned, so it has
+                # contributions and no pot. The identity is about hands that
+                # were played; see TestCancelledHand.
+                if hand.is_cancelled:
+                    continue
                 self.assertEqual(sum(r.contributed for r in hand.results),
                                  hand.total_pot)
 
@@ -134,6 +140,11 @@ class TestParserInvariants(unittest.TestCase):
         for name in self.FIXTURE_NAMES:
             with self.subTest(fixture=name):
                 hand = load(name)
+                # A cancelled hand's posts are returned, so it has
+                # contributions and no pot. The identity is about hands that
+                # were played; see TestCancelledHand.
+                if hand.is_cancelled:
+                    continue
                 self.assertEqual(
                     sum(r.collected for r in hand.results) + hand.rake
                     + hand.cashout_residual,
@@ -1607,6 +1618,73 @@ class TestLiveHistory(unittest.TestCase):
                 total += 1
                 self.assertEqual(hand.problems, [], f"{hand.site_hand_no}")
         self.assertGreater(total, 0)
+
+
+class TestCancelledHand(unittest.TestCase):
+    """`Hand cancelled` is a format, not a fault.
+
+    A table can empty out between the blinds going in and the cards coming
+    out. PokerStars returns the posts and prints the line; the hand has no
+    hole cards and no pot. Reporting that as a problem would make
+    `stats --problems` cry wolf, and storing it would add a seat and a
+    returned blind to every denominator downstream.
+    """
+
+    def test_cancellation_is_not_a_problem(self):
+        hand = load("cancelled_hand")
+        self.assertTrue(hand.is_cancelled)
+        self.assertEqual(hand.problems, [])
+
+    def test_a_cancelled_hand_never_reaches_the_database(self):
+        conn = db.connect(":memory:")
+        hand = load("cancelled_hand")
+        self.assertIsNone(db.insert_hand(conn, hand))
+        self.assertEqual(conn.execute("SELECT count(*) FROM hands").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM problems").fetchone()[0], 0)
+
+    def test_missing_hole_cards_without_a_cancellation_is_still_a_problem(self):
+        hand = load("cancelled_hand")
+        hand.is_cancelled = False
+        from pokertracker.parser import _check_invariants
+        _check_invariants(hand, seen_hole_cards=False)
+        self.assertEqual(len(hand.problems), 1)
+
+
+
+class TestRequestedHistoryBanners(unittest.TestCase):
+    """Hand histories requested from PokerStars come banner-separated.
+
+    Client-written files run one hand straight into the next; a requested or
+    emailed history prefixes each with `*********** # 1 **************`. The
+    banner before the very first hand is the one that matters: it would open a
+    block with no header line in it, which parses as a fatal bad header and
+    lands a phantom hand in the problems table.
+    """
+
+    def _banner_wrap(self, blocks):
+        return "\n".join(
+            f"*********** # {n} **************\n{b}\n"
+            for n, b in enumerate(blocks, 1)
+        )
+
+    def test_banners_do_not_become_hands(self):
+        texts = [(FIXTURES / f"{name}.txt").read_text(encoding="utf-8").strip()
+                 for name in ("six_handed", "heads_up")]
+        blocks = split_hands(self._banner_wrap(texts))
+        self.assertEqual(len(blocks), 2)
+        for b in blocks:
+            self.assertTrue(b.startswith("PokerStars"), b[:60])
+
+    def test_banner_wrapped_hands_parse_clean(self):
+        texts = [(FIXTURES / f"{name}.txt").read_text(encoding="utf-8").strip()
+                 for name in ("six_handed", "cashout_winner")]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "requested.txt"
+            path.write_text(self._banner_wrap(texts), encoding="utf-8")
+            hands = parse_file(path)
+        self.assertEqual(len(hands), 2)
+        for hand in hands:
+            self.assertEqual(hand.problems, [], hand.site_hand_no)
 
 
 if __name__ == "__main__":

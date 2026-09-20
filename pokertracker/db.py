@@ -241,7 +241,29 @@ def _rake_shares(hand: Hand) -> dict[str, int]:
     return shares
 
 
+def _purge_hand(conn: sqlite3.Connection, site_hand_no: str) -> None:
+    """Drop every row a previous import left behind for this hand number."""
+    row = conn.execute(
+        "SELECT hand_id FROM hands WHERE site_hand_no = ?", (site_hand_no,)
+    ).fetchone()
+    if not row:
+        return
+    for table in ("seats", "actions", "results", "timeouts", "allin_ev", "problems"):
+        conn.execute(f"DELETE FROM {table} WHERE hand_id = ?", (row["hand_id"],))
+    conn.execute("DELETE FROM hands WHERE hand_id = ?", (row["hand_id"],))
+
+
 def insert_hand(conn: sqlite3.Connection, hand: Hand, source_file: str = "") -> int | None:
+    # A cancelled hand is not a hand: the blinds that went in were returned
+    # and no cards were dealt. Storing it would put a seat, a dealt-in count
+    # and a returned blind into every denominator downstream. It is dropped
+    # rather than filed as a problem -- nothing about it is a parser fault.
+    # The purge still runs: an earlier parser stored this hand, and a re-import
+    # is the only thing that will ever take it back out.
+    if hand.is_cancelled:
+        _purge_hand(conn, hand.site_hand_no)
+        return None
+
     if any(p.startswith("FATAL") for p in hand.problems):
         conn.execute(
             "INSERT INTO problems(site_hand_no, problem) VALUES (?,?)",
@@ -252,13 +274,7 @@ def insert_hand(conn: sqlite3.Connection, hand: Hand, source_file: str = "") -> 
     assign_positions(hand)
     n_dealt = sum(1 for s in hand.seats if s.is_dealt_in)
 
-    cur = conn.execute("SELECT hand_id FROM hands WHERE site_hand_no = ?", (hand.site_hand_no,))
-    row = cur.fetchone()
-    if row:
-        hand_id = row["hand_id"]
-        for table in ("seats", "actions", "results", "timeouts", "allin_ev", "problems"):
-            conn.execute(f"DELETE FROM {table} WHERE hand_id = ?", (hand_id,))
-        conn.execute("DELETE FROM hands WHERE hand_id = ?", (hand_id,))
+    _purge_hand(conn, hand.site_hand_no)
 
     cur = conn.execute(
         """INSERT INTO hands (site_hand_no, played_at, played_at_et, table_name, game_type,
