@@ -152,8 +152,6 @@ def _blank(player: str) -> dict:
 
 
 def rebuild(conn: sqlite3.Connection, progress=None) -> int:
-    conn.executescript(DDL)
-
     hands = conn.execute(
         "SELECT hand_id, bb, button_seat, board_flop, board_turn, board_river,"
         " went_to_showdown, total_pot FROM hands ORDER BY hand_id"
@@ -196,12 +194,24 @@ def rebuild(conn: sqlite3.Connection, progress=None) -> int:
 
     cols = ["hand_id", "player", "position", "is_hero", "hole_combo",
             "starting_stack", "eff_stack_bb", "hand_class"] + _INT_COLUMNS
-    conn.executemany(
-        f"INSERT INTO hand_player ({','.join(cols)}) "
-        f"VALUES ({','.join('?' * len(cols))})",
-        [tuple(r.get(c, 0) for c in cols) for r in rows],
-    )
-    conn.commit()
+    # The drop, the create and the insert are one transaction, opened only
+    # once the replay above is finished. executescript() commits on its own,
+    # so running DDL first left an EMPTY hand_player visible to every other
+    # connection for as long as the replay took -- and `serve` rebuilds every
+    # minute, so a `refresh` beside it would find a period with hands in it
+    # and no derived rows behind them. Under WAL a reader keeps the old table
+    # until the commit below.
+    conn.executescript("BEGIN IMMEDIATE;" + DDL)
+    try:
+        conn.executemany(
+            f"INSERT INTO hand_player ({','.join(cols)}) "
+            f"VALUES ({','.join('?' * len(cols))})",
+            [tuple(r.get(c, 0) for c in cols) for r in rows],
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return len(rows)
 
 

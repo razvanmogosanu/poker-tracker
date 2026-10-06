@@ -1687,5 +1687,47 @@ class TestRequestedHistoryBanners(unittest.TestCase):
             self.assertEqual(hand.problems, [], hand.site_hand_no)
 
 
+class TestRebuildIsAtomic(unittest.TestCase):
+    """A second connection must never see hand_player between drop and refill.
+
+    `serve` rebuilds on every poll, and a `refresh` run beside it once found
+    the table empty: a period with 242 hands in it, a money summary with none,
+    and a KeyError where the rake tile should have been.
+    """
+
+    def test_a_reader_keeps_the_old_rows_during_a_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "poker.db"
+            writer = db.connect(path)
+            for src in sorted(FIXTURES.glob("*.txt")):
+                for hand in parse_file(src):
+                    db.insert_hand(writer, hand, str(src))
+            n = derive.rebuild(writer)
+            self.assertGreater(n, 0)
+
+            reader = db.connect(path)
+            seen = []
+            real = derive._classify_rows
+
+            def probe(*args):
+                # The slowest part of the replay is over by here, which is
+                # exactly when the old version had already emptied the table.
+                seen.append(reader.execute(
+                    "SELECT COUNT(*) FROM hand_player").fetchone()[0])
+                return real(*args)
+
+            derive._classify_rows = probe
+            try:
+                derive.rebuild(writer)
+            finally:
+                derive._classify_rows = real
+            after = reader.execute(
+                "SELECT COUNT(*) FROM hand_player").fetchone()[0]
+            reader.close()
+            writer.close()
+        self.assertEqual(seen, [n])
+        self.assertEqual(after, n)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

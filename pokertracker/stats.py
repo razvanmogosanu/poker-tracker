@@ -191,12 +191,17 @@ def periods(conn: sqlite3.Connection, hero: str,
     of hands, "last session", "today" and "last 7 days" are the same
     set, and offering three buttons that do the same thing is worse than one.
     """
+    # hand_player is joined only to say "already derived". Another process can
+    # have imported hands that derive has not reached yet, and offering a
+    # window made only of those -- a session that started a minute ago -- hands
+    # every stat behind it an empty result.
     rows = conn.execute(
         """SELECT h.hand_id, h.played_at, h.session_id
            FROM hands h JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
+           JOIN hand_player hp ON hp.hand_id = h.hand_id AND hp.player = ?
            WHERE {CASH_ONLY}
            ORDER BY h.played_at, h.hand_id""".format(CASH_ONLY=CASH_ONLY),
-        (hero,),
+        (hero, hero),
     ).fetchall()
     total = len(rows)
     all_window = Window("All hands", "1=1", (), total)
