@@ -31,8 +31,13 @@ python -m pokertracker.cli refresh   # or just regenerate report.html once
 local server every 60 seconds. Each poll runs the same pipeline; when it finds
 new hands the page reloads in place, preserving your scroll position, and the
 toolbar carries the time of the last check either way. A `report.html` opened
-directly from disk never refreshes, because a `file://` page cannot run the
-parser.
+directly from disk never refreshes itself, because a `file://` page cannot run
+the parser — but while `serve` is running it rewrites the file whenever a poll
+finds new hands, so reloading it by hand shows them. `--output ""` turns that
+off.
+
+Without the server, double-click `Refresh report.cmd`: it runs `refresh` below
+and opens the rewritten `report.html`.
 
 `refresh` is the only command you otherwise need: it imports anything new from
 `%LOCALAPPDATA%\PokerStars.RO\HandHistory`, recomputes the derived tables,

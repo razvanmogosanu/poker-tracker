@@ -57,7 +57,8 @@ def cmd_serve(args) -> int:
     conn = db.connect(args.db)
     hero = args.hero or db.detect_hero(conn)
     conn.close()
-    serve_mod.serve(args.db, args.root, hero, args.port, not args.no_open)
+    serve_mod.serve(args.db, args.root, hero, args.port, not args.no_open,
+                    args.output)
     return 0
 
 
@@ -523,6 +524,8 @@ def main(argv=None) -> int:
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-open", action="store_true",
                    help="do not open a browser window")
+    s.add_argument("-o", "--output", default="report.html",
+                   help="report file kept current as hands arrive; '' for none")
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("derive", help="rebuild the derived flag table")

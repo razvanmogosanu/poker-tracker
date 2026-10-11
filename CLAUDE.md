@@ -433,7 +433,11 @@ would jump back to a filter the reader is no longer looking at.
 
 `report.build(conn, hero, live=False)`. `live=True` adds the refresh toolbar and
 its JavaScript, and is used only by `serve.py` — a `file://` page cannot run the
-parser, so the on-disk `report.html` deliberately never refreshes. The live page
+parser, so the on-disk `report.html` deliberately never refreshes itself.
+`serve.run_refresh` rewrites it instead, with `live=False`, and only on a poll
+that changed the hand count or found the file missing: most polls find nothing,
+and rendering the dashboard for a file nobody reloaded is the waste. `Refresh
+report.cmd` is the same thing without the server. The live page
 polls `/api/refresh` every 60 seconds and reloads *only* when the poll reports
 new hands, so a reader mid-scroll is not thrown back to the top on every tick;
 the toolbar stamp moves on every poll, including the empty ones, because "we

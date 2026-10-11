@@ -1729,5 +1729,68 @@ class TestRebuildIsAtomic(unittest.TestCase):
         self.assertEqual(after, n)
 
 
+class TestServeKeepsTheFileCurrent(unittest.TestCase):
+    """`serve` rewrites report.html when a poll changes the hands, and only then.
+
+    The file used to describe the hands as they stood at the last `cli refresh`
+    however long the server had been importing since.
+    """
+
+    def setUp(self):
+        from pokertracker import serve
+        self.serve = serve
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        tmp = Path(self.dir.name)
+        self.root = tmp / "history"
+        self.root.mkdir()
+        self.db = str(tmp / "poker.db")
+        self.out = tmp / "report.html"
+        self._deal("six_handed")
+
+    def _deal(self, name):
+        (self.root / f"{name}.txt").write_text(
+            (FIXTURES / f"{name}.txt").read_text(encoding="utf-8"),
+            encoding="utf-8")
+
+    def _refresh(self, output=None):
+        return self.serve.run_refresh(
+            self.db, str(self.root),
+            output=str(self.out) if output is None else output)
+
+    def test_new_hands_rewrite_the_file(self):
+        self.assertTrue(self._refresh()["report_written"])
+        self.out.write_text("stale", encoding="utf-8")
+        self._deal("heads_up")
+        res = self._refresh()
+        self.assertEqual(res["new_hands"], 1)
+        self.assertTrue(res["report_written"])
+        self.assertIn("<!doctype html>", self.out.read_text(encoding="utf-8"))
+
+    def test_an_empty_poll_leaves_the_file_alone(self):
+        self._refresh()
+        self.out.write_text("untouched", encoding="utf-8")
+        res = self._refresh()
+        self.assertEqual(res["new_hands"], 0)
+        self.assertFalse(res["report_written"])
+        self.assertEqual(self.out.read_text(encoding="utf-8"), "untouched")
+
+    def test_a_missing_file_is_written_even_with_nothing_new(self):
+        self._refresh()
+        self.out.unlink()
+        self.assertTrue(self._refresh()["report_written"])
+        self.assertTrue(self.out.exists())
+
+    def test_the_file_is_the_static_page_not_the_live_one(self):
+        """A file:// page cannot poll, so it must not carry the toolbar."""
+        self._refresh()
+        self.assertNotIn('id="refresh-status"',
+                         self.out.read_text(encoding="utf-8"))
+
+    def test_no_output_writes_nothing(self):
+        self.assertFalse(self._refresh(output="")["report_written"])
+        self.assertFalse(self.out.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

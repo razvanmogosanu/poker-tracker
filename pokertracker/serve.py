@@ -26,8 +26,13 @@ from . import db, derive, equity, report
 _refresh_lock = threading.Lock()
 
 
-def run_refresh(db_path: str, root: str, hero_hint: str = "") -> dict:
-    """Import anything new, rebuild derived stats, compute EV. Returns a summary."""
+def run_refresh(db_path: str, root: str, hero_hint: str = "",
+                output: str = "") -> dict:
+    """Import anything new, rebuild derived stats, compute EV. Returns a summary.
+
+    With `output`, the on-disk report is rewritten too, so the file is not left
+    describing the hands as they stood when the server was started.
+    """
     started = time.time()
     with _refresh_lock:
         conn = db.connect(db_path)
@@ -39,6 +44,15 @@ def run_refresh(db_path: str, root: str, hero_hint: str = "") -> dict:
             ev_rows = equity.compute_all(conn)
             after = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
             problems = conn.execute("SELECT COUNT(*) n FROM problems").fetchone()["n"]
+            # Only when the hands changed: the poll runs every 60 seconds and
+            # most of them find nothing, which is no reason to render and write
+            # the whole dashboard again. It is the static page that is written,
+            # not the live one -- a file:// page still cannot poll anything.
+            written = False
+            if output and (after != before or not Path(output).exists()):
+                who = hero_hint or db.detect_hero(conn)
+                Path(output).write_text(report.build(conn, who), encoding="utf-8")
+                written = True
             return {
                 "ok": True,
                 "new_hands": after - before,
@@ -47,13 +61,14 @@ def run_refresh(db_path: str, root: str, hero_hint: str = "") -> dict:
                 "files_skipped": res["skipped"],
                 "ev_rows": ev_rows,
                 "problems": problems,
+                "report_written": written,
                 "elapsed": round(time.time() - started, 1),
             }
         finally:
             conn.close()
 
 
-def make_handler(db_path: str, root: str, hero: str):
+def make_handler(db_path: str, root: str, hero: str, output: str = ""):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -82,7 +97,7 @@ def make_handler(db_path: str, root: str, hero: str):
                 self._send(b"not found", "text/plain; charset=utf-8", 404)
                 return
             try:
-                result = run_refresh(db_path, root, hero)
+                result = run_refresh(db_path, root, hero, output)
             except Exception as exc:  # surfaced in the page, not swallowed
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             self._send(json.dumps(result).encode("utf-8"), "application/json")
@@ -104,7 +119,7 @@ def _already_running(port: int) -> bool:
 
 
 def serve(db_path: str, root: str, hero: str = "", port: int = 8765,
-          open_browser: bool = True) -> None:
+          open_browser: bool = True, output: str = "") -> None:
     url = f"http://127.0.0.1:{port}/"
     # Double-clicking the launcher twice should show the dashboard, not crash
     # with "address already in use".
@@ -114,11 +129,13 @@ def serve(db_path: str, root: str, hero: str = "", port: int = 8765,
             webbrowser.open(url)
         return
 
-    handler = make_handler(db_path, root, hero)
+    handler = make_handler(db_path, root, hero, output)
     with ThreadingHTTPServer(("127.0.0.1", port), handler) as httpd:
         print(f"serving the dashboard at {url}")
         print(f"  database    {Path(db_path).resolve()}")
         print(f"  histories   {root}")
+        if output:
+            print(f"  report      {Path(output).resolve()}")
         print("  press Ctrl+C to stop")
         if open_browser:
             threading.Timer(0.4, lambda: webbrowser.open(url)).start()
