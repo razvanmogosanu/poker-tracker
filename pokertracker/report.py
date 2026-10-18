@@ -377,6 +377,15 @@ JS = """
   }
   const SEQ_LIGHT = ['#cde2fb','#b7d3f6','#9ec5f4','#86b6ef','#6da7ec','#5598e7',
                      '#3987e5','#2a78d6','#256abf','#1c5cab','#184f95','#104281','#0d366b'];
+  // Below this share played, a starting-hand cell is painted blank on both
+  // metrics. bb/100 is over every deal, so a hand that is always folded shows
+  // only the blinds lost folding it -- noise in red, not a result.
+  const RARELY_PLAYED = 2;
+  // The bb/100 colour scale ends at this share of the played cells.
+  const SCALE_PCTILE = 0.9;
+  // Blank is white on a light page and the surface on a dark one, where the
+  // ramp runs the other way and white would be the loudest cell on it.
+  function blankColor() { return isDark() ? '#1a1a19' : '#ffffff'; }
   function hex2rgb(h){return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
   function rgb2hex(c){return '#'+c.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');}
   function lerp(a,b,t){return a.map((v,i)=>v+(b[i]-v)*t);}
@@ -492,34 +501,47 @@ JS = """
 
       // One scale across both panels. Two grids scaled independently would
       // show a difference in colour that is not a difference in the data.
-      let maxAbs = 1;
+      // The ends sit at the SCALE_PCTILE of |bb/100|, not the maximum: AA alone
+      // runs to four figures, and scaling to it washed every other cell into
+      // the grey midpoint. Cells past the end saturate, and the legend says so.
+      const mags = [];
       sides.forEach(function (side) {
         const g = (p[side] || {})[pos] || {};
         Object.keys(g).forEach(function (k) {
           const v = g[k][2];
-          if (v !== null && v !== undefined) maxAbs = Math.max(maxAbs, Math.abs(v));
+          if (!g[k][0] || 100 * g[k][1] / g[k][0] < RARELY_PLAYED) return;
+          if (v !== null && v !== undefined) mags.push(Math.abs(v));
         });
       });
+      mags.sort((a, b) => a - b);
+      const maxAbs = Math.max(1, mags.length
+        ? mags[Math.min(mags.length - 1, Math.floor(SCALE_PCTILE * mags.length))] : 1);
 
       $$('.cellg', wrap).forEach(function (cell) {
         const d = cellOf(cell.dataset.side, cell.dataset.combo);
         const rect = $('rect', cell), label = $('text', cell);
         const value = d ? d[metric] : null;
+        // Inline style, not the fill attribute: a presentation attribute loses
+        // to any stylesheet rule, and .cell / .cell-label both set a fill, so
+        // setAttribute('fill') left every cell the colour of the surface.
         if (value === null || value === undefined) {
-          rect.setAttribute('fill', 'none');
-          rect.setAttribute('stroke-dasharray', '2 2');
-          label.setAttribute('fill', 'var(--muted)');
-          label.setAttribute('opacity', '0.5');
+          rect.style.fill = 'none';
+          rect.style.strokeDasharray = '2 2';
+          label.style.fill = 'var(--muted)';
+          label.style.opacity = '0.5';
           return;
         }
-        rect.removeAttribute('stroke-dasharray');
-        label.removeAttribute('opacity');
-        // Floor the sequential ramp so a combo that was dealt but never played
-        // still reads as a filled cell rather than vanishing into the surface.
-        const fill = metric === 'freq' ? seqColor(0.12 + 0.88 * (d.freq / 100))
-                                       : divColor(d.bb100 / maxAbs);
-        rect.setAttribute('fill', fill);
-        label.setAttribute('fill', lum(fill) > 0.42 ? '#0b0b0b' : '#ffffff');
+        rect.style.strokeDasharray = '';
+        label.style.opacity = '';
+        // A combo played under RARELY_PLAYED % of the time is blank, not the
+        // palest blue: most of the grid is folded hands, and tinting them all
+        // buries the range that was actually played. Never-dealt cells keep
+        // their dashed outline, so blank still means "dealt and folded".
+        const fill = d.freq < RARELY_PLAYED ? blankColor()
+          : metric === 'freq' ? seqColor(0.12 + 0.88 * (d.freq / 100))
+          : divColor(d.bb100 / maxAbs);
+        rect.style.fill = fill;
+        label.style.fill = lum(fill) > 0.42 ? '#0b0b0b' : '#ffffff';
       });
 
       const steps = [];
@@ -528,10 +550,13 @@ JS = """
         steps.push('<i style="background:' +
           (metric === 'freq' ? seqColor(t) : divColor(t * 2 - 1)) + '"></i>');
       }
+      const blank = '<span class="ramp"><i style="background:' + blankColor() +
+        ';outline:1px solid var(--border);outline-offset:-1px"></i></span><span>played under ' +
+        RARELY_PLAYED + '%</span>';
       legend.innerHTML = (metric === 'freq'
-        ? '<span>0%</span><span class="ramp">' + steps.join('') + '</span><span>100% played</span>'
-        : '<span>-' + maxAbs.toFixed(0) + '</span><span class="ramp">' + steps.join('') +
-          '</span><span>+' + maxAbs.toFixed(0) + ' bb/100</span>');
+        ? blank + '<span class="ramp">' + steps.join('') + '</span><span>100% played</span>'
+        : blank + '<span>&le; -' + maxAbs.toFixed(0) + '</span><span class="ramp">' +
+          steps.join('') + '</span><span>&ge; +' + maxAbs.toFixed(0) + ' bb/100</span>');
       $$('.chip[data-pos]', wrap).forEach(b =>
         b.setAttribute('aria-pressed', String(b.dataset.pos === pos)));
       $$('.chip.metric', wrap).forEach(b =>
