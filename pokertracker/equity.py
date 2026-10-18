@@ -98,6 +98,141 @@ def hand_equities(hole: dict[str, str], board: list[int]) -> tuple[dict[str, flo
     return {p: win_sums[p] / n_boards for p in players}, n_boards
 
 
+# The most (runout, holding) pairs `hand_vs_range` will enumerate before it
+# samples instead. Every postflop question fits with room to spare -- a flop
+# against all 1,225 other holdings is 1.3M -- and so does a hand against a
+# single holding preflop. What does not fit is a hand against a *range*
+# preflop: 2.1M boards times several hundred holdings.
+ENUMERATE_UP_TO = 5_000_000
+# Boards drawn in total when sampling, spread evenly across the holdings.
+SAMPLE_BOARDS = 400_000
+SAMPLE_SEED = 20260901
+
+
+def hand_vs_range(hole, board, combos) -> dict:
+    """One hand's equity against every holding in a range.
+
+    `hole` is two card ints, `board` zero or three to five, and `combos` an
+    (N, 2) array of opposing holdings that already excludes the hole cards and
+    the board (`ranges.combos` does this). Every holding counts once: a range
+    is a set of holdings, and the cards that remove some of them have been
+    applied before this is called.
+
+    Returns the overall equity with its win and tie parts, and `per_combo`,
+    the equity against each holding in order, which is what lets the caller
+    say how a hand does against one slice of a range without asking again.
+
+    **This is the one place in the module that may sample.** Everything that
+    fits under `ENUMERATE_UP_TO` is enumerated like the rest of the file, and
+    that is every flop, turn and river. A hand against a range preflop does
+    not fit, so it draws `SAMPLE_BOARDS` boards from a fixed seed -- the same
+    number for each holding, so the weighting is still exact and only the
+    boards are sampled -- and reports the standard error it paid for that.
+    `method` says which happened and a caller must show it: a sampled 54.1%
+    and an enumerated 54.1% are not the same kind of number.
+    """
+    hero = np.array([int(c) for c in hole], dtype=np.int32)
+    known = np.array([int(c) for c in board], dtype=np.int32)
+    combos = np.asarray(combos, dtype=np.int32).reshape(-1, 2)
+    n_combos = combos.shape[0]
+    if hero.size != 2 or known.size not in (0, 3, 4, 5):
+        raise ValueError("expected two hole cards and a board of 0, 3, 4 or 5")
+    if n_combos == 0:
+        raise ValueError("the range is empty once the known cards are removed")
+    used = np.concatenate([hero, known])
+    if len(set(used.tolist())) != used.size or np.isin(combos, used).any():
+        raise ValueError("a card appears twice")
+
+    to_come = 5 - known.size
+    deck = np.array([c for c in range(52) if c not in set(used.tolist())],
+                    dtype=np.int32)
+
+    if comb(deck.size, to_come) * n_combos <= ENUMERATE_UP_TO:
+        win, tie, cnt = _enumerate_vs_range(hero, known, combos, deck, to_come)
+        method, se = "exact", 0.0
+    else:
+        win, tie, cnt, se = _sample_vs_range(hero, known, combos, to_come)
+        method = "sampled"
+
+    total = float(cnt.sum())
+    return {
+        "equity": float((win + tie / 2).sum()) / total,
+        "win": float(win.sum()) / total,
+        "tie": float(tie.sum()) / total,
+        "per_combo": (win + tie / 2) / cnt,
+        "method": method,
+        "se": se,
+        "evaluated": int(total),
+    }
+
+
+def _enumerate_vs_range(hero, known, combos, deck, to_come):
+    """Win, tie and count per holding over every runout that holding allows."""
+    n_combos = combos.shape[0]
+    runouts = deck[_combo_index(deck.size, to_come).astype(np.int32)] \
+        if to_come > 0 else np.zeros((1, 0), dtype=np.int32)
+    win = np.zeros(n_combos)
+    tie = np.zeros(n_combos)
+    cnt = np.zeros(n_combos)
+
+    step = max(1, CHUNK // n_combos)
+    for start in range(0, runouts.shape[0], step):
+        drawn = runouts[start:start + step]                       # (m, to_come)
+        m = drawn.shape[0]
+        full = np.hstack([np.tile(known, (m, 1)), drawn]) if known.size else drawn
+        hero_score = evaluate(np.hstack([np.tile(hero, (m, 1)), full]))
+
+        # Every holding on every runout in this slice, one rectangular call.
+        rows = np.hstack([np.tile(combos, (m, 1)), np.repeat(full, n_combos, axis=0)])
+        vill = evaluate(rows).reshape(m, n_combos)
+        # The deck still holds the range's own cards, so a runout can deal one
+        # of them. Those pairs are not hands that can happen and are left out.
+        live = ~(combos[None, :, :, None] == drawn[:, None, None, :]).any(axis=(2, 3))
+
+        win += ((hero_score[:, None] > vill) & live).sum(axis=0)
+        tie += ((hero_score[:, None] == vill) & live).sum(axis=0)
+        cnt += live.sum(axis=0)
+    return win, tie, cnt
+
+
+def _sample_vs_range(hero, known, combos, to_come):
+    """The same three arrays from a fixed-seed sample, plus a standard error."""
+    n_combos = combos.shape[0]
+    per = max(1, SAMPLE_BOARDS // n_combos)
+    rng = np.random.default_rng(SAMPLE_SEED)
+    win = np.zeros(n_combos)
+    tie = np.zeros(n_combos)
+    shares = []
+
+    step = max(1, CHUNK // per)
+    for start in range(0, n_combos, step):
+        part = combos[start:start + step]
+        held = np.repeat(part, per, axis=0)                       # (m, 2)
+        m = held.shape[0]
+        # A random order over the whole deck with the dead cards pushed to the
+        # back: the first `to_come` are a uniform draw without replacement.
+        keys = rng.random((m, 52))
+        rows = np.arange(m)[:, None]
+        keys[rows, held] = 2.0
+        keys[:, hero] = 2.0
+        if known.size:
+            keys[:, known] = 2.0
+        drawn = np.argpartition(keys, to_come, axis=1)[:, :to_come].astype(np.int32)
+        full = np.hstack([np.tile(known, (m, 1)), drawn]) if known.size else drawn
+
+        hero_score = evaluate(np.hstack([np.tile(hero, (m, 1)), full]))
+        vill = evaluate(np.hstack([held, full]))
+        w = (hero_score > vill).reshape(-1, per)
+        t = (hero_score == vill).reshape(-1, per)
+        win[start:start + step] = w.sum(axis=1)
+        tie[start:start + step] = t.sum(axis=1)
+        shares.append((w + t / 2).ravel())
+
+    share = np.concatenate(shares)
+    se = float(share.std(ddof=1) / np.sqrt(share.size)) if share.size > 1 else 0.0
+    return win, tie, np.full(n_combos, float(per)), se
+
+
 def _layer_equities(hole: dict[str, str], board: list[int], layers) -> dict:
     """Equity per pot layer, using only the players eligible for that layer."""
     cache: dict[tuple, dict] = {}

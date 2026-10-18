@@ -59,6 +59,7 @@ Other commands:
 | `serve --port 8765` | Serve the dashboard, refreshing itself every 60s |
 | `export` | The whole dashboard as JSON, for reviewing against the data |
 | `hands --metric stat:fold_to_3bet --text` | The real hands behind a stat |
+| `solve --cards "Ah Qh" --board "Qs 7h 2c" --range "22+, AJs+" --pot 9 --bet 3` | The Solver tab's answer as JSON (or `--hand <id>` to start from a real hand) |
 | `review add/list/status/close` | The review journal (below) |
 
 Useful flags: `--root` for a different history folder, `--db` for a different
@@ -269,6 +270,45 @@ One thing worth knowing: AA vs KK preflop is **81.3%** when all four suits are
 distinct. The commonly quoted 82.4% is a different suit configuration; the
 all-distinct case is the worst one for the aces because it leaves both of the
 kings' suits fully live.
+
+## The Solver tab
+
+The page has two tabs. **Stats** is everything below; **Solver** takes one
+hand, a board, and a range you put the opponent on, and works out three things:
+
+- your **equity** against that range;
+- what the range **is made of** on that board — the same made-hand buckets as
+  section 10, with your equity against each;
+- what **calling or betting** is worth, in big blinds.
+
+It is not a solver. It finds no strategy; it does the arithmetic a player does
+at the table with exact numbers in place of guessed ones, against the range
+*you* chose, assuming no further betting. The tab says so under every answer.
+
+Pick cards from the deck, or press **Analyse** beside any hand in the
+biggest-pots list to load that spot: your cards, the board as of that street,
+the pot before your decision and what you faced or bet. When one opponent is
+left it suggests a range from your own preflop chart and says why ("they called
+a raise from BB"); that is your plan read onto somebody else, so change it if
+they do not play like it.
+
+The range is a 13×13 grid, a text box (`QQ+, AKs, A5s-A2s, T9s-76s`) and
+preset chips, all showing the same set. The presets are the seven ranges of the
+preflop chart.
+
+**You never type a fold frequency.** Betting, you tick which of their buckets
+continue; the fold percentage is the share of holdings left unticked and the
+equity when called is your equity against exactly the ticked ones. Before the
+flop there are no buckets, so no fold frequency is offered at all.
+
+Flop, turn and river are enumerated exactly. A hand against a *range* preflop
+is too many boards for that, so it is estimated from 400,000 sampled boards and
+printed with its ± beside it.
+
+The tab needs the server: every number is computed in Python. `report.html`
+opened from disk shows the tab with a note saying what to start. While you are
+on the Solver tab the page holds its auto-reload, so new hands arriving do not
+wipe a scenario in progress.
 
 ## Reading the dashboard
 

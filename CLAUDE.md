@@ -546,6 +546,66 @@ only worth doing for the few dozen hands the biggest-pots drill-down shows;
 never call it over a whole result set. A source file that has since moved
 yields no text rather than an error, and the report says so in the panel.
 
+## The Solver tab
+
+`report.build` renders two tabs, Stats and Solver. The Solver is `ranges.py`
+(the 169 cells, the text syntax, card removal), `equity.hand_vs_range`, and
+`solver.py` (`analyse` and `from_hand`), reached through `POST /api/solve`,
+`POST /api/range` and `GET /api/hand` in `serve.py`, or `cli solve`.
+
+**It is not a solver, and `solver.CAVEAT` travels with every answer.** It finds
+no strategy: one hero hand against a range somebody chose, with no further
+betting. A real solver is a game-tree engine and a different project; do not
+let the tab's name leak into what the numbers are described as.
+
+**`SOLVER_JS` holds no poker logic.** Not the range syntax, not card removal,
+not a pot-odds formula. The page posts what was typed or clicked and paints
+what comes back -- `/api/range` exists only so the grid and the text box cannot
+disagree about what `ATs+` means. Only the live page carries it; the static
+page shows the tab with a note, because every figure is computed in Python and
+a `file://` page has nothing to ask.
+
+**The fold frequency is derived from the buckets, never typed in.** "They fold
+60%" is the number everybody wants to enter and nobody knows. Which hands
+continue is something a player can have an opinion about, so the reader ticks
+`handclass` buckets, the fold frequency is the share of holdings left unticked,
+and the equity when called is the equity against exactly the ticked ones. The
+two move together, which a typed percentage never would. Preflop has no buckets
+and therefore no fold frequency: `fold_derived` is false and the bet is priced
+as called by the whole range, rather than inviting a guess.
+
+**`equity.hand_vs_range` is the one place that may sample.** Everything under
+`ENUMERATE_UP_TO` pairs is enumerated -- every flop, turn and river, and a hand
+against a single holding preflop. A hand against a *range* preflop is 2.1M
+boards times hundreds of holdings, so it draws `SAMPLE_BOARDS` from a fixed
+seed, the same number per holding so only the boards are sampled and the
+weighting stays exact. The result carries `method` and `se` and the tab prints
+them: a sampled figure must never be shown as if it were enumerated.
+
+**A range is cells, and every holding counts once.** No suit-specific combos,
+no per-cell weights. `ranges.parse` raises on an unknown token rather than
+skipping it, for the reason an unresolvable metric id raises: a range that lost
+a third of itself to a typo still produces a plausible equity.
+
+**`ranges.PRESETS` are the hero's own preflop chart**, copied from it. Their
+combo counts are pinned in `test_solver.py`, so changing one is a decision.
+(The chart's prose says "about 16%" for UTG; the range it lists is 13.7%. The
+ranges were copied, not the labels.) `from_hand` suggests one only when exactly
+one opponent is left and only for an open, a 3-bet or a call of one raise, and
+returns the reason with it -- reading an opponent through the hero's chart is
+an assumption and the tab shows it as one.
+
+**`from_hand` takes the hero's last action on the street as the spot**, with
+the pot being every `amount` before it. Amounts are bb floats in this module
+and that is not the money path: nothing here records chips that moved, and the
+ledger's integer cents are converted only on the way out.
+
+**The live poll holds its reload while the Solver tab is showing.** A reload
+rebuilds the page and a half-built scenario cannot be given back, so `LIVE_JS`
+waits for the `pt-tab` event that says the reader went back to Stats. The
+Analyse buttons are bound by delegation on `document` for the same reason
+`initDrilldown` exists: the period filter replaces the drill-down's markup.
+
 ## Sample size
 
 The report attaches a confidence interval to every displayed rate, and the

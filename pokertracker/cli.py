@@ -62,6 +62,38 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_solve(args) -> int:
+    """The Solver tab's answer as JSON -- the same dict the page is painted
+    from, so a review can quote a number without a browser open."""
+    import json
+
+    from . import solver
+
+    try:
+        if args.hand:
+            conn = db.connect(args.db)
+            spec = solver.from_hand(conn, args.hero or db.detect_hero(conn),
+                                    args.hand, args.street)
+            # A real hand supplies whatever was not given on the command line.
+            for key in ("range", "pot", "bet", "mode"):
+                given = getattr(args, key)
+                if given not in (None, ""):
+                    spec[key] = given
+        else:
+            spec = {"hero": args.hero_cards, "board": args.board,
+                    "range": args.range, "pot": args.pot or 0,
+                    "bet": args.bet or 0, "mode": args.mode or "facing_bet"}
+        if args.continues is not None:
+            spec["continues"] = [c.strip() for c in args.continues.split(",")
+                                 if c.strip()]
+        result = solver.analyse(spec)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def cmd_derive(args) -> int:
     conn = db.connect(args.db)
     n = derive.rebuild(conn)
@@ -570,6 +602,26 @@ def main(argv=None) -> int:
     s.add_argument("--text", action="store_true",
                    help="print the original hand history for each")
     s.set_defaults(func=cmd_hands)
+
+    s = sub.add_parser("solve",
+                       help="equity and EV for one hand against a range")
+    s.add_argument("--cards", dest="hero_cards", default="",
+                   help="your hole cards, e.g. 'As Kd'")
+    s.add_argument("--board", default="", help="'' or three to five cards")
+    s.add_argument("--range", default="",
+                   help="their range, e.g. 'QQ+, AKs, A5s-A2s'")
+    s.add_argument("--pot", type=float, default=None,
+                   help="pot in bb; facing a bet it includes that bet")
+    s.add_argument("--bet", type=float, default=None,
+                   help="bb to call, or bb you bet")
+    s.add_argument("--mode", choices=("facing_bet", "betting"), default=None)
+    s.add_argument("--continues", default=None,
+                   help="comma-separated buckets that do not fold to a bet")
+    s.add_argument("--hand", type=int, default=0,
+                   help="start from a real hand: its hand_id")
+    s.add_argument("--street", default="",
+                   help="with --hand: preflop, flop, turn or river")
+    s.set_defaults(func=cmd_solve)
 
     s = sub.add_parser("review", help="the review journal: findings over time")
     s.add_argument("--journal", default=str(DEFAULT_JOURNAL))

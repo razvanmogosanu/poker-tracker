@@ -6,7 +6,8 @@ import json
 import sqlite3
 from datetime import datetime
 
-from . import charts, db, handclass, stats
+from . import charts, db, handclass, ranges, solver, stats
+from .cards import RANK_CHARS, grid_cell
 from .charts import esc, fmt
 from .positions import POSITION_ORDER
 
@@ -277,6 +278,62 @@ tr.spotlight td { background: color-mix(in srgb, var(--warn) 8%, transparent); }
   background: color-mix(in srgb, var(--muted) 14%, transparent); color: var(--ink-2); }
 .tag.win { background: color-mix(in srgb, var(--pos) 16%, transparent); color: var(--pos); }
 .tag.loss { background: color-mix(in srgb, var(--neg) 16%, transparent); color: var(--neg); }
+/* Stats | Solver. The selected tab is marked by weight and an underline, not
+   by colour. */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 14px 0 20px; }
+.tab {
+  font: inherit; font-size: 14px; padding: 8px 16px; cursor: pointer; background: transparent;
+  color: var(--ink-2); border: none; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+/* Analysing a hand needs the server, so the button exists only on its page. */
+.analyse-btn { display: none; margin-left: 6px; }
+body.live .analyse-btn { display: inline-block; }
+.sv-cols { display: flex; flex-wrap: wrap; gap: 28px; }
+.sv-col { flex: 1 1 380px; min-width: 0; }
+.sv-col h3 { margin-top: 0; }
+.sv-slots { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.sv-slots .sv-gap { width: 10px; }
+.sv-slots small { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+.sv-slot {
+  width: 44px; height: 56px; font: 600 17px/1 system-ui, sans-serif; border-radius: 7px; cursor: pointer;
+  border: 1px dashed var(--axis); background: transparent; color: var(--ink);
+}
+.sv-slot.filled { border-style: solid; background: var(--page); }
+.sv-slot[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 1px; }
+.sv-deck { display: grid; grid-template-columns: repeat(13, 1fr); gap: 3px; max-width: 470px; }
+.sv-card {
+  font: inherit; font-size: 12.5px; padding: 5px 0; border-radius: 5px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--page); color: var(--ink);
+}
+.sv-card:hover:not(:disabled) { border-color: var(--ink); }
+.sv-card:disabled { opacity: .25; cursor: default; }
+/* The suit symbol carries the suit; the colour is the usual redundancy. */
+.sv-card[data-suit="h"], .sv-card[data-suit="d"],
+.sv-slot[data-suit="h"], .sv-slot[data-suit="d"] { color: var(--bad); }
+.sv-grid { display: grid; grid-template-columns: repeat(13, 1fr); gap: 2px; max-width: 470px; user-select: none; }
+.sv-cell {
+  font: inherit; font-size: 10.5px; padding: 0; aspect-ratio: 1; border-radius: 3px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--page); color: var(--ink-2);
+}
+.sv-cell.pair { border-color: var(--axis); }
+.sv-cell[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.sv-field { display: inline-flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); margin: 12px 12px 0 0; }
+.sv-field input {
+  font: inherit; font-size: 14px; padding: 5px 8px; width: 130px; border-radius: 6px;
+  border: 1px solid var(--axis); background: var(--page); color: var(--ink);
+}
+.sv-field.wide { display: flex; margin-right: 0; }
+.sv-field.wide input { width: 100%; max-width: 470px; }
+.sv-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+.sv-go {
+  font: inherit; font-size: 14px; font-weight: 600; padding: 7px 18px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--ink); background: var(--ink); color: var(--surface);
+}
+.status.err { color: var(--bad); }
+#sv-out .tiles { margin: 20px 0 8px; }
+#sv-out td.none { color: var(--muted); }
 @media (max-width: 640px) { body { padding: 18px 12px 60px; } .tile .v { font-size: 23px; } }
 """
 
@@ -297,6 +354,21 @@ JS = """
   let BANDS = {};
   let RAWS = {};
   const listeners = [];
+
+  // ---- Stats | Solver
+  // Announced on the document because two other scripts care which tab is
+  // showing: the live poll holds its reload while a scenario is being built,
+  // and the Solver switches here itself when a hand is sent to it.
+  $$('.tab[data-tab]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('.tab[data-tab]').forEach(function (o) {
+        o.setAttribute('aria-selected', String(o === b));
+        const pane = document.getElementById('tab-' + o.dataset.tab);
+        if (pane) pane.hidden = o !== b;
+      });
+      document.dispatchEvent(new CustomEvent('pt-tab', { detail: b.dataset.tab }));
+    });
+  });
 
   function isDark() {
     const t = document.documentElement.getAttribute('data-theme');
@@ -676,6 +748,7 @@ LIVE_JS = """
   // reassurance the line exists to give.
   let stamp = new Date();
   let busy = false;
+  let waiting = false;
 
   function clock(d) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -685,7 +758,7 @@ LIVE_JS = """
     status.classList.remove('busy');
   }
   function showStamp() {
-    if (busy) return;
+    if (busy || waiting) return;
     const secs = Math.round((Date.now() - stamp.getTime()) / 1000);
     const ago = secs < 90 ? secs + 's ago'
               : Math.round(secs / 60) + 'm ago';
@@ -715,8 +788,24 @@ LIVE_JS = """
         showStamp();
         return;
       }
-      status.textContent = (behind > 0 ? '+' + behind + ' hands' : 'history changed')
-                           + ', reloading';
+      const what = behind > 0 ? '+' + behind + ' hands' : 'history changed';
+      // A reload rebuilds the page, and a half-built scenario on the Solver
+      // tab is not something the server can give back. New hands arriving is
+      // no reason to throw it away, so the reload waits for the reader to go
+      // back to Stats -- which is the tab the new hands are for anyway.
+      const solver = document.getElementById('tab-solver');
+      if (solver && !solver.hidden) {
+        busy = false;
+        idle(what + ' — will reload when you go back to Stats');
+        if (!waiting) {
+          waiting = true;
+          document.addEventListener('pt-tab', function (ev) {
+            if (ev.detail === 'stats') { waiting = false; refresh(); }
+          }, { once: true });
+        }
+        return;
+      }
+      status.textContent = what + ', reloading';
       // Both are read once on the way back and cleared, so only the reload
       // this line is about restores anything.
       sessionStorage.setItem(SCROLL, String(window.scrollY));
@@ -731,6 +820,319 @@ LIVE_JS = """
   showStamp();
   setInterval(showStamp, 5000);
   setInterval(refresh, EVERY);
+})();
+"""
+
+
+# The Solver tab. Only the live page carries this: every number on the tab is
+# computed by the server, so on a file:// page there is nothing for it to call.
+# It holds no poker logic at all -- not the range syntax, not card removal, not
+# a pot-odds formula. It collects a scenario, posts it, and paints the answer,
+# so there is one definition of each of those and it is the tested one.
+SOLVER_JS = """
+(function () {
+  const root = document.getElementById('solver');
+  const dataEl = document.getElementById('solver-data');
+  if (!root || !dataEl) return;
+  const D = JSON.parse(dataEl.textContent);
+  const $ = (s, r) => (r || root).querySelector(s);
+  const $$ = (s, r) => Array.from((r || root).querySelectorAll(s));
+  const SUIT = { s: '♠', h: '♥', d: '♦', c: '♣' };
+  const SLOTS = ['h0', 'h1', 'b0', 'b1', 'b2', 'b3', 'b4'];
+  const state = { cards: {}, active: 'h0', cells: new Set(),
+                  mode: 'facing_bet', continues: null };
+  const out = $('#sv-out'), status = $('#sv-status'), note = $('#sv-hand');
+  const rangeBox = $('#sv-range'), count = $('#sv-count');
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  function face(card) { return card[0] + SUIT[card[1]]; }
+  function pct(x, d) { return (x * 100).toFixed(d === undefined ? 1 : d) + '%'; }
+  function bb(x) { return (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2) + ' bb'; }
+  function say(text, bad) {
+    status.textContent = text;
+    status.classList.remove('busy');
+    status.classList.toggle('err', !!bad);
+  }
+
+  async function api(path, body) {
+    const res = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+    return d;
+  }
+
+  // ---- cards
+  function paintCards() {
+    const used = new Set(Object.values(state.cards));
+    $$('.sv-slot').forEach(function (b) {
+      const c = state.cards[b.dataset.slot];
+      b.textContent = c ? face(c) : '';
+      b.dataset.suit = c ? c[1] : '';
+      b.classList.toggle('filled', !!c);
+      b.setAttribute('aria-pressed', String(b.dataset.slot === state.active));
+    });
+    $$('.sv-card').forEach(function (b) { b.disabled = used.has(b.dataset.card); });
+  }
+  function firstEmpty() { return SLOTS.find(k => !state.cards[k]) || null; }
+  $$('.sv-slot').forEach(function (b) {
+    b.addEventListener('click', function () {
+      delete state.cards[b.dataset.slot];
+      state.active = b.dataset.slot;
+      paintCards();
+    });
+  });
+  $$('.sv-card').forEach(function (b) {
+    b.addEventListener('click', function () {
+      const slot = state.active && !state.cards[state.active] ? state.active : firstEmpty();
+      if (!slot) return;
+      state.cards[slot] = b.dataset.card;
+      state.active = firstEmpty();
+      paintCards();
+    });
+  });
+
+  // ---- range: the grid, the text and the presets are three views of one set
+  function paintGrid() {
+    $$('.sv-cell').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(state.cells.has(b.dataset.cell)));
+    });
+  }
+  let rangeSeq = 0;
+  async function syncRange(text) {
+    const mine = ++rangeSeq;
+    try {
+      const d = await api('/api/range', { range: text });
+      if (mine !== rangeSeq) return false;
+      state.cells = new Set(d.cells);
+      rangeBox.value = d.range;
+      count.textContent = d.combos + ' holdings · ' + pct(d.combos / 1326) + ' of hands';
+      paintGrid();
+      $$('.chip[data-preset]').forEach(o => o.setAttribute('aria-pressed', 'false'));
+      say('');
+      return true;
+    } catch (e) { say(e.message, true); return false; }
+  }
+  let painting = null, timer = null;
+  function touch(b) {
+    if (painting) state.cells.add(b.dataset.cell); else state.cells.delete(b.dataset.cell);
+    b.setAttribute('aria-pressed', String(painting));
+    clearTimeout(timer);
+    timer = setTimeout(function () { syncRange(Array.from(state.cells).join(' ')); }, 250);
+  }
+  $$('.sv-cell').forEach(function (b) {
+    // Press to toggle one cell, drag to paint the rest the same way.
+    b.addEventListener('mousedown', function (ev) {
+      ev.preventDefault();
+      painting = !state.cells.has(b.dataset.cell);
+      touch(b);
+    });
+    b.addEventListener('mouseenter', function () { if (painting !== null) touch(b); });
+    b.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault();
+      painting = !state.cells.has(b.dataset.cell);
+      touch(b);
+      painting = null;
+    });
+  });
+  document.addEventListener('mouseup', function () { painting = null; });
+  rangeBox.addEventListener('change', function () { syncRange(rangeBox.value); });
+  rangeBox.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); syncRange(rangeBox.value).then(ok => ok && solve()); }
+  });
+  $$('.chip[data-preset]').forEach(function (b) {
+    b.addEventListener('click', async function () {
+      const p = D.presets.find(x => x.key === b.dataset.preset);
+      if (await syncRange(p.range)) b.setAttribute('aria-pressed', 'true');
+    });
+  });
+
+  // ---- the bet
+  function paintMode() {
+    $$('.chip[data-mode]').forEach(o =>
+      o.setAttribute('aria-pressed', String(o.dataset.mode === state.mode)));
+    const facing = state.mode === 'facing_bet';
+    $('#sv-pot-label').textContent = facing ? 'Pot, with their bet in it (bb)' : 'Pot (bb)';
+    $('#sv-bet-label').textContent = facing ? 'To call (bb)' : 'Your bet (bb)';
+  }
+  $$('.chip[data-mode]').forEach(function (b) {
+    b.addEventListener('click', function () { state.mode = b.dataset.mode; paintMode(); });
+  });
+
+  // ---- the answer
+  function spec() {
+    const s = {
+      hero: ['h0', 'h1'].map(k => state.cards[k]).filter(Boolean).join(' '),
+      board: ['b0', 'b1', 'b2', 'b3', 'b4'].map(k => state.cards[k]).filter(Boolean).join(' '),
+      range: Array.from(state.cells).join(' '),
+      pot: $('#sv-pot').value, bet: $('#sv-bet').value, mode: state.mode,
+    };
+    if (state.continues) s.continues = Array.from(state.continues);
+    return s;
+  }
+  let solveSeq = 0;
+  async function solve() {
+    const mine = ++solveSeq;
+    status.textContent = 'Calculating';
+    status.classList.remove('err');
+    status.classList.add('busy');
+    try {
+      const d = await api('/api/solve', spec());
+      if (mine !== solveSeq) return;
+      // Kept only once there are buckets to keep: a preflop answer has none,
+      // and remembering "nothing continues" from it would fold every hand on
+      // the next flop.
+      if (d.buckets.length) {
+        state.continues = new Set(d.buckets.filter(b => b.continues).map(b => b.bucket));
+      }
+      render(d);
+      say('');
+    } catch (e) {
+      if (mine === solveSeq) say(e.message, true);
+    }
+  }
+  $('#sv-go').addEventListener('click', solve);
+  ['#sv-pot', '#sv-bet'].forEach(function (id) {
+    $(id).addEventListener('keydown', function (ev) { if (ev.key === 'Enter') solve(); });
+  });
+
+  function tile(k, v, m) {
+    return '<div class="tile"><div class="k">' + esc(k) + '</div><div class="v">'
+      + esc(v) + '</div><div class="m">' + esc(m) + '</div></div>';
+  }
+  function render(d) {
+    const how = d.method === 'exact'
+      ? 'exact · ' + d.evaluated.toLocaleString() + ' runouts × holdings'
+      : 'estimated from ' + d.evaluated.toLocaleString() + ' sampled boards, ± '
+        + pct(1.96 * d.se) + ' — preflop against a range is too many boards to enumerate';
+    let html = '<div class="tiles">'
+      + tile('Your equity', pct(d.equity), how)
+      + tile('You hold', d.hero_class || d.hero,
+             d.board ? d.hero + ' on ' + d.board : 'preflop')
+      + tile('Their range', d.combos.toLocaleString(),
+             'holdings once your cards and the board are removed');
+    if (d.facing) {
+      const f = d.facing;
+      html += tile('Calling ' + d.bet + ' bb to win ' + d.pot + ' bb', bb(f.ev_call),
+                   'needs ' + pct(f.required_equity) + ' · you have ' + pct(d.equity));
+    } else {
+      const b = d.betting;
+      const called = b.equity_when_called === null ? 'nothing calls'
+                   : pct(b.equity_when_called) + ' equity when called';
+      html += tile('Betting ' + d.bet + ' bb into ' + d.pot + ' bb', bb(b.ev_bet),
+                   (b.fold_derived
+                      ? 'they fold ' + pct(b.fold_freq) + ' (the unticked rows below)'
+                      : 'no fold frequency before the flop: priced as called by the whole range')
+                   + ' · ' + called)
+            + tile('Checking instead', bb(b.ev_check),
+                   'a bet with no equity needs ' + pct(b.breakeven_fold) + ' folds');
+    }
+    html += '</div>';
+
+    if (d.buckets.length) {
+      const pick = !!d.betting;
+      html += '<table><thead><tr><th>Their hand</th><th>Holdings</th>'
+            + '<th>Share of range</th><th>Your equity against it</th>'
+            + (pick ? '<th>Continues against a bet</th>' : '') + '</tr></thead><tbody>';
+      d.buckets.forEach(function (r) {
+        const none = r.combos === 0;
+        html += '<tr><td' + (none ? ' class="none"' : '') + '>' + esc(r.label) + '</td>'
+              + '<td' + (none ? ' class="none"' : '') + '>' + r.combos + '</td>'
+              + '<td' + (none ? ' class="none"' : '') + '>' + (none ? '—' : pct(r.share)) + '</td>'
+              + '<td' + (none ? ' class="none"' : '') + '>' + (none ? '—' : pct(r.equity)) + '</td>'
+              + (pick ? '<td><input type="checkbox" data-bucket="' + esc(r.bucket) + '"'
+                        + (r.continues ? ' checked' : '')
+                        + ' aria-label="' + esc(r.label) + ' continues"></td>' : '')
+              + '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '<p class="note">' + esc(d.caveat) + '</p>';
+    out.innerHTML = html;
+    $$('input[data-bucket]', out).forEach(function (box) {
+      box.addEventListener('change', function () {
+        if (box.checked) state.continues.add(box.dataset.bucket);
+        else state.continues.delete(box.dataset.bucket);
+        solve();
+      });
+    });
+  }
+
+  // ---- a real hand, sent over from the Stats tab
+  async function loadHand(id, street) {
+    const tab = document.querySelector('.tab[data-tab="solver"]');
+    if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click();
+    say('Loading hand');
+    let d;
+    try {
+      d = await api('/api/hand?id=' + encodeURIComponent(id)
+                    + (street ? '&street=' + encodeURIComponent(street) : ''));
+    } catch (e) { say(e.message, true); return; }
+
+    state.cards = {};
+    d.hero.split(' ').filter(Boolean).forEach((c, i) => { state.cards['h' + i] = c; });
+    d.board.split(' ').filter(Boolean).forEach((c, i) => { state.cards['b' + i] = c; });
+    state.active = firstEmpty();
+    state.mode = d.mode;
+    state.continues = null;
+    $('#sv-pot').value = d.pot;
+    $('#sv-bet').value = d.bet;
+    paintCards();
+    paintMode();
+
+    const verb = { fold: 'folded', call: 'called', check: 'checked',
+                   bet: 'bet', raise: 'raised' }[d.did] || d.did;
+    let html = '<b>Hand #' + esc(d.site_hand_no) + '</b> · '
+      + d.streets.map(s => '<button type="button" class="chip" data-street="' + esc(s)
+          + '" aria-pressed="' + (s === d.street) + '">' + esc(s) + '</button>').join(' ')
+      + ' · you ' + esc(verb) + ' here'
+      + (d.hero_position ? ' from ' + esc(d.hero_position) : '') + '. ';
+    const opp = d.opponents.map(o => esc(o.player) + (o.position ? ' (' + esc(o.position) + ')' : '')
+      + (o.shown ? ', who showed ' + esc(o.shown) : ''));
+    if (d.opponents.length === 1) {
+      html += 'Against ' + opp[0] + '. ';
+      const p = D.presets.find(x => x.key === d.preset);
+      html += p ? 'Range suggested: <b>' + esc(p.label) + '</b>, because ' + esc(d.preset_why)
+                  + '. That is your own chart read onto an opponent — change it if they do not play like it.'
+                : 'Nothing in your chart describes what they did preflop, so the range is yours to pick.';
+    } else {
+      html += d.opponents.length + ' opponents still in: ' + opp.join('; ')
+            + '. Pick the range of the one you want to test against.';
+    }
+    note.innerHTML = html;
+    note.hidden = false;
+    $$('[data-street]', note).forEach(function (b) {
+      b.addEventListener('click', function () { loadHand(id, b.dataset.street); });
+    });
+
+    out.innerHTML = '';
+    if (d.range) {
+      if (await syncRange(d.range)) solve();
+    } else {
+      say('Pick a range, then Calculate');
+    }
+  }
+  // Delegated, because the period filter replaces the drill-down's markup
+  // wholesale and a handler bound to a button would go with it.
+  document.addEventListener('click', function (ev) {
+    const b = ev.target.closest && ev.target.closest('[data-analyse]');
+    if (b) loadHand(b.dataset.analyse, '');
+  });
+
+  $('#sv-clear').addEventListener('click', function () {
+    state.cards = {}; state.active = 'h0'; state.continues = null;
+    note.hidden = true; note.innerHTML = ''; out.innerHTML = '';
+    paintCards();
+    syncRange('');
+  });
+
+  paintCards();
+  paintMode();
 })();
 """
 
@@ -883,7 +1285,10 @@ def _hand_rows(rows) -> str:
             "<tr>"
             f"<td><button type=\"button\" class=\"hand-btn\" data-hand=\"{r['hand_id']}\" "
             f"data-no=\"{esc(r['site_hand_no'])}\" aria-expanded=\"false\" "
-            f"title=\"Show the raw hand history\">#{esc(r['site_hand_no'])}</button></td>"
+            f"title=\"Show the raw hand history\">#{esc(r['site_hand_no'])}</button>"
+            f"<button type=\"button\" class=\"hand-btn analyse-btn\" "
+            f"data-analyse=\"{r['hand_id']}\" "
+            f"title=\"Open this hand in the Solver tab\">Analyse</button></td>"
             f"<td class=\"when\" data-v=\"{esc(r['played_at'])}\">{esc(r['played_at'][:16])}"
             f"<small>{esc(r['table_name'])}</small></td>"
             f"<td>{esc(r['position'])}</td>"
@@ -1371,6 +1776,92 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
     return regions, grids, drill_ids
 
 
+_SUIT_SYMBOL = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
+
+
+def _solver_panel(live: bool) -> str:
+    """The Solver tab. The static page gets the explanation and no machinery.
+
+    Everything on the tab is computed by `solver.analyse` through the server,
+    so a page opened from disk has nothing to ask. It still shows the tab,
+    because a tab that exists on one page and not the other reads as a bug,
+    and says what to start.
+    """
+    intro = (
+        '<p class="note">Pick your hand, a board and the range you put them '
+        'on, and this works out your equity, what their range is made of on '
+        'that board, and what calling or betting is worth. '
+        f'{esc(solver.CAVEAT)}</p>')
+    if not live:
+        return intro + (
+            '<div class="card"><p class="empty">The Solver calculates in '
+            'Python, so it needs the tracker running. Start <b>Poker '
+            'tracker.cmd</b> (or <code>python -m pokertracker.cli serve</code>) '
+            'and use the page it opens.</p></div>')
+
+    def slot(key: str, label: str) -> str:
+        return (f'<button type="button" class="sv-slot" data-slot="{key}" '
+                f'aria-label="{label}" aria-pressed="false"></button>')
+
+    slots = (
+        '<small>You</small>' + slot("h0", "Your first card")
+        + slot("h1", "Your second card")
+        + '<span class="sv-gap"></span><small>Flop</small>'
+        + "".join(slot(f"b{i}", f"Flop card {i + 1}") for i in range(3))
+        + '<span class="sv-gap"></span><small>Turn</small>' + slot("b3", "Turn")
+        + '<small>River</small>' + slot("b4", "River"))
+    deck = "".join(
+        f'<button type="button" class="sv-card" data-card="{r}{s}" '
+        f'data-suit="{s}">{r}{_SUIT_SYMBOL[s]}</button>'
+        for s in "shdc" for r in reversed(RANK_CHARS))
+    grid = "".join(
+        f'<button type="button" class="sv-cell{" pair" if row == col else ""}" '
+        f'data-cell="{grid_cell(row, col)}" aria-pressed="false">'
+        f'{grid_cell(row, col)}</button>'
+        for row in range(13) for col in range(13))
+    presets = "".join(
+        f'<button type="button" class="chip" data-preset="{esc(key)}" '
+        f'aria-pressed="false">{esc(label)}</button>'
+        for key, label, _text in ranges.PRESETS)
+    data = _json_script(
+        {"presets": [{"key": k, "label": label, "range": ranges.to_text(ranges.parse(t))}
+                     for k, label, t in ranges.PRESETS]},
+        "solver-data")
+
+    return intro + f"""<div class="card" id="solver">
+<div class="banner" id="sv-hand" hidden></div>
+<div class="sv-cols">
+<div class="sv-col">
+<h3>Your hand and the board</h3>
+<div class="sv-slots">{slots}</div>
+<div class="sv-deck">{deck}</div>
+<div class="chip-row" style="margin-top:16px"><span class="chip-label">Spot</span>
+<button type="button" class="chip" data-mode="facing_bet" aria-pressed="true">Facing a bet</button>
+<button type="button" class="chip" data-mode="betting" aria-pressed="false">Betting</button></div>
+<label class="sv-field"><span id="sv-pot-label">Pot (bb)</span>
+<input id="sv-pot" type="number" min="0" step="0.5" value="6"></label>
+<label class="sv-field"><span id="sv-bet-label">To call (bb)</span>
+<input id="sv-bet" type="number" min="0" step="0.5" value="3"></label>
+</div>
+<div class="sv-col">
+<h3>Their range</h3>
+<div class="chip-row"><span class="chip-label">Your chart</span>{presets}</div>
+<div class="sv-grid">{grid}</div>
+<label class="sv-field wide"><span>As text &mdash; e.g. QQ+, AKs, A5s-A2s, KTs+
+&middot; <span id="sv-count">0 holdings</span></span>
+<input id="sv-range" type="text" spellcheck="false" autocomplete="off"></label>
+</div>
+</div>
+<div class="sv-actions">
+<button type="button" class="sv-go" id="sv-go">Calculate</button>
+<button type="button" class="chip" id="sv-clear">Clear</button>
+<span class="status" id="sv-status"></span>
+</div>
+<div id="sv-out"></div>
+</div>
+{data}"""
+
+
 def _json_script(payload: dict, element_id: str) -> str:
     """Inline JSON that cannot terminate its own script element."""
     text = json.dumps(payload, separators=(",", ":")).replace("<", "\\u003c")
@@ -1500,17 +1991,25 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
 <div class="toolbar">
   <span id="refresh-status" class="status" data-hands="{rendered_hands}">Checking every 60s</span>
 </div>""" if live else "")
-    live_js = LIVE_JS if live else ""
+    live_js = LIVE_JS + SOLVER_JS if live else ""
     a = regions["all"]
+    tabs = (
+        '<div class="tabs" role="tablist">'
+        '<button type="button" class="tab" role="tab" data-tab="stats" '
+        'aria-selected="true">Stats</button>'
+        '<button type="button" class="tab" role="tab" data-tab="solver" '
+        'aria-selected="false">Solver</button></div>')
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Poker tracker &mdash; {esc(hero)}</title>
 <style>{CSS}</style></head>
-<body><div class="wrap">
+<body{' class="live"' if live else ''}><div class="wrap">
 
 <h1>{esc(hero)}</h1>
+{tabs}
+<div id="tab-stats">
 <p class="sub" id="r-sub">{a['r-sub']}</p>
 {toolbar}
 {period_bar}
@@ -1629,6 +2128,10 @@ reason this table recomputes with the filter rather than staying put.</p>
 <footer>Generated by pokertracker from PokerStars hand histories.
 Rake is attributed to players in proportion to contribution, which is an
 estimate: PokerStars reports rake per pot, not per player.{tourney_note}</footer>
+</div>
+<div id="tab-solver" hidden>
+{_solver_panel(live)}
+</div>
 </div>
 {payload}
 <script>{JS}{live_js}</script>

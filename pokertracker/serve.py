@@ -18,8 +18,9 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-from . import db, derive, equity, report
+from . import db, derive, equity, ranges, report, solver
 
 # Only one refresh may run at a time: two concurrent imports would fight over
 # the same rows, and the pipeline is fast enough that queueing is fine.
@@ -68,6 +69,21 @@ def run_refresh(db_path: str, root: str, hero_hint: str = "",
             conn.close()
 
 
+def _range(spec: dict) -> dict:
+    """Range text -> its cells and its canonical text, for the Solver grid.
+
+    The page keeps no copy of the range syntax: it sends whatever was typed or
+    clicked and paints what comes back, so the grid and the text box cannot
+    come to disagree about what 'ATs+' means.
+    """
+    cells = ranges.parse(str(spec.get("range") or ""))
+    return {
+        "cells": sorted(cells, key=ranges.CELLS.index),
+        "range": ranges.to_text(cells),
+        "combos": int(len(ranges.combos(cells))),
+    }
+
+
 def make_handler(db_path: str, root: str, hero: str, output: str = ""):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -80,8 +96,34 @@ def make_handler(db_path: str, root: str, hero: str, output: str = ""):
             self.end_headers()
             self.wfile.write(body)
 
+        def _json(self, payload: dict, status: int = 200) -> None:
+            self._send(json.dumps(payload).encode("utf-8"), "application/json",
+                       status)
+
+        def _solver(self, work) -> None:
+            """Run one Solver-tab request. A bad scenario is a 400 carrying the
+            sentence the page shows, not a traceback in the terminal."""
+            try:
+                self._json(work())
+            except (ValueError, KeyError, TypeError) as exc:
+                self._json({"error": str(exc)}, 400)
+
+        def _hand(self) -> dict:
+            query = parse_qs(urlparse(self.path).query)
+            conn = db.connect(db_path)
+            try:
+                return solver.from_hand(
+                    conn, hero or db.detect_hero(conn),
+                    int(query["id"][0]), query.get("street", [""])[0])
+            finally:
+                conn.close()
+
         def do_GET(self):  # noqa: N802
-            if self.path.split("?")[0] not in ("/", "/index.html"):
+            path = self.path.split("?")[0]
+            if path == "/api/hand":
+                self._solver(self._hand)
+                return
+            if path not in ("/", "/index.html"):
                 self._send(b"not found", "text/plain; charset=utf-8", 404)
                 return
             conn = db.connect(db_path)
@@ -93,7 +135,18 @@ def make_handler(db_path: str, root: str, hero: str, output: str = ""):
             self._send(html.encode("utf-8"), "text/html; charset=utf-8")
 
         def do_POST(self):  # noqa: N802
-            if self.path.split("?")[0] != "/api/refresh":
+            path = self.path.split("?")[0]
+            # Neither Solver endpoint takes the refresh lock: they compute from
+            # the request alone and write nothing.
+            if path in ("/api/solve", "/api/range"):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                if path == "/api/solve":
+                    self._solver(lambda: solver.analyse(json.loads(body or b"{}")))
+                else:
+                    self._solver(lambda: _range(json.loads(body or b"{}")))
+                return
+            if path != "/api/refresh":
                 self._send(b"not found", "text/plain; charset=utf-8", 404)
                 return
             try:
@@ -103,7 +156,7 @@ def make_handler(db_path: str, root: str, hero: str, output: str = ""):
             self._send(json.dumps(result).encode("utf-8"), "application/json")
 
         def log_message(self, fmt, *args):
-            if self.command == "POST":
+            if self.command == "POST" and self.path.startswith("/api/refresh"):
                 print(f"  refresh at {self.log_date_time_string()}")
 
     return Handler
