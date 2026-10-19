@@ -148,8 +148,14 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # Before the script, not after: an outdated `hands` table makes SCHEMA's own
     # index statements fail with "no such column", which says nothing useful.
-    _check_schema(conn)
-    conn.executescript(SCHEMA)
+    try:
+        _check_schema(conn)
+        conn.executescript(SCHEMA)
+    except BaseException:
+        # The caller never receives the connection, so nobody else can close
+        # it, and on Windows an open handle keeps the file it names locked.
+        conn.close()
+        raise
     return conn
 
 

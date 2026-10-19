@@ -58,6 +58,7 @@ class TestTheBriefDerivesNothing(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = build_db()
+        cls.addClassCleanup(cls.conn.close)
         cls.b = brief.build(cls.conn, cls.HERO)
 
     def test_the_figures_are_the_stats_functions_verbatim(self):
@@ -122,6 +123,7 @@ class TestTheMetricNamespace(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = build_db()
+        cls.addClassCleanup(cls.conn.close)
 
     def test_every_advertised_id_resolves(self):
         for mid in brief.metric_ids():
@@ -265,6 +267,7 @@ class TestProgressIsMeasuredOnHandsSince(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = build_db()
+        cls.addClassCleanup(cls.conn.close)
         cls.rows = cls.conn.execute(
             f"""SELECT h.played_at, h.hand_id FROM hands h
                 JOIN results r ON r.hand_id = h.hand_id AND r.player = ?
@@ -322,6 +325,7 @@ class TestAThinWindowSaysSo(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = build_db()
+        cls.addClassCleanup(cls.conn.close)
 
     def _status(self, path, **kw):
         rec = {"op": "open", "id": "x", "opened": "2026-09-01T10:00:00",
@@ -376,6 +380,7 @@ class TestAddStampsTheMoment(unittest.TestCase):
 
     def setUp(self):
         self.conn = build_db()
+        self.addCleanup(self.conn.close)
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / "reviews.jsonl"
 

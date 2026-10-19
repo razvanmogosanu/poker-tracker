@@ -271,6 +271,7 @@ class TestDerivedFlags(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.conn.close)
         cls.conn.row_factory = sqlite3.Row
         cls.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -369,6 +370,7 @@ class TestBigPots(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.conn.close)
         cls.conn.row_factory = sqlite3.Row
         cls.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -585,6 +587,7 @@ class TestHandClassInTheDatabase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.conn.close)
         cls.conn.row_factory = sqlite3.Row
         cls.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -929,6 +932,7 @@ class TestStreetFunnel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.conn = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.conn.close)
         cls.conn.row_factory = sqlite3.Row
         cls.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -977,10 +981,10 @@ class TestStreetFunnel(unittest.TestCase):
 class TestSessionBoundaries(unittest.TestCase):
     """Sessions are assigned once at ingest, and must not move afterwards."""
 
-    @staticmethod
-    def build(offsets):
+    def build(self, offsets):
         """A database whose only content is hands at the given minute offsets."""
         conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
         conn.row_factory = sqlite3.Row
         conn.executescript(db.SCHEMA)
         for i, minute in enumerate(offsets):
@@ -1046,11 +1050,13 @@ class TestStaleSchema(unittest.TestCase):
 
     def test_a_fresh_database_is_not_stale(self):
         conn = db.connect(":memory:")
+        self.addCleanup(conn.close)
         self.assertIn("session_id",
                       {r["name"] for r in conn.execute("PRAGMA table_info(hands)")})
 
     def test_a_database_missing_a_column_is_rejected_by_name(self):
         conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
         conn.row_factory = sqlite3.Row
         # The schema as it stood before session_id existed.
         conn.execute("CREATE TABLE hands (hand_id INTEGER PRIMARY KEY,"
@@ -1058,6 +1064,35 @@ class TestStaleSchema(unittest.TestCase):
         with self.assertRaises(db.StaleSchema) as ctx:
             db._check_schema(conn)
         self.assertIn("session_id", str(ctx.exception))
+
+
+def period_db() -> sqlite3.Connection:
+    """Every fixture, spread over three sessions on two days."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for path in sorted(FIXTURES.glob("*.txt")):
+        for hand in parse_file(path):
+            db.insert_hand(conn, hand, str(path))
+    # Spread the fixtures over three sessions on two days, so that every
+    # period option has something different to select.
+    rows = conn.execute(
+        "SELECT hand_id FROM hands ORDER BY played_at, hand_id").fetchall()
+    stamps = ["2026-09-01 10:00:00", "2026-09-01 10:01:00", "2026-09-01 10:02:00",
+              "2026-09-01 18:00:00", "2026-09-01 18:01:00",
+              "2026-09-03 20:00:00", "2026-09-03 20:01:00", "2026-09-03 20:02:00",
+              "2026-09-03 21:30:00", "2026-09-03 21:31:00"]
+    # A fixture added later must land inside the last session rather than
+    # quietly keeping its own timestamp, or adding one would change which
+    # periods these classes are exercising.
+    stamps += [f"2026-09-03 21:{32 + i:02d}:00"
+               for i in range(len(rows) - len(stamps))]
+    for r, stamp in zip(rows, stamps):
+        conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
+                     (stamp, r["hand_id"]))
+    db.assign_sessions(conn)
+    derive.rebuild(conn)
+    return conn
 
 
 class TestPeriodFilters(unittest.TestCase):
@@ -1073,30 +1108,8 @@ class TestPeriodFilters(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.conn = sqlite3.connect(":memory:")
-        cls.conn.row_factory = sqlite3.Row
-        cls.conn.executescript(db.SCHEMA)
-        for path in sorted(FIXTURES.glob("*.txt")):
-            for hand in parse_file(path):
-                db.insert_hand(cls.conn, hand, str(path))
-        # Spread the fixtures over three sessions on two days, so that every
-        # period option has something different to select.
-        rows = cls.conn.execute(
-            "SELECT hand_id FROM hands ORDER BY played_at, hand_id").fetchall()
-        stamps = ["2026-09-01 10:00:00", "2026-09-01 10:01:00", "2026-09-01 10:02:00",
-                  "2026-09-01 18:00:00", "2026-09-01 18:01:00",
-                  "2026-09-03 20:00:00", "2026-09-03 20:01:00", "2026-09-03 20:02:00",
-                  "2026-09-03 21:30:00", "2026-09-03 21:31:00"]
-        # A fixture added later must land inside the last session rather than
-        # quietly keeping its own timestamp, or adding one would change which
-        # periods this class is exercising.
-        stamps += [f"2026-09-03 21:{32 + i:02d}:00"
-                   for i in range(len(rows) - len(stamps))]
-        for r, stamp in zip(rows, stamps):
-            cls.conn.execute("UPDATE hands SET played_at = ? WHERE hand_id = ?",
-                             (stamp, r["hand_id"]))
-        db.assign_sessions(cls.conn)
-        derive.rebuild(cls.conn)
+        cls.conn = period_db()
+        cls.addClassCleanup(cls.conn.close)
         cls.periods = stats.periods(cls.conn, cls.HERO, last_n=(2,))
 
     def test_more_than_one_period_is_on_offer(self):
@@ -1202,6 +1215,7 @@ class TestTodayIsACalendarDay(unittest.TestCase):
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
+        self.addCleanup(self.conn.close)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -1285,6 +1299,7 @@ class TestLastSevenDaysIsOnTheClock(unittest.TestCase):
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
+        self.addCleanup(self.conn.close)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -1362,6 +1377,7 @@ class TestStaleness(unittest.TestCase):
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
+        self.addCleanup(self.conn.close)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(db.SCHEMA)
         for path in sorted(FIXTURES.glob("*.txt")):
@@ -1439,6 +1455,7 @@ class TestTournamentsExcluded(unittest.TestCase):
 
     def load_into(self, names):
         conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
         conn.row_factory = sqlite3.Row
         conn.executescript(db.SCHEMA)
         for name in names:
@@ -1499,7 +1516,10 @@ class TestReportPeriods(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.conn = TestPeriodFilters.conn
+        # Its own copy: borrowing TestPeriodFilters' connection made this class
+        # depend on that one having run first, and on it never being closed.
+        cls.conn = period_db()
+        cls.addClassCleanup(cls.conn.close)
         # Not TestPeriodFilters' hero: that one folds the button for nothing in
         # every fixture, so it has no biggest pots and the drill-down would be
         # empty for reasons that have nothing to do with periods.
@@ -1637,6 +1657,7 @@ class TestCancelledHand(unittest.TestCase):
 
     def test_a_cancelled_hand_never_reaches_the_database(self):
         conn = db.connect(":memory:")
+        self.addCleanup(conn.close)
         hand = load("cancelled_hand")
         self.assertIsNone(db.insert_hand(conn, hand))
         self.assertEqual(conn.execute("SELECT count(*) FROM hands").fetchone()[0], 0)
