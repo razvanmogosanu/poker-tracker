@@ -436,7 +436,13 @@ its JavaScript, and is used only by `serve.py` — a `file://` page cannot run t
 parser, so the on-disk `report.html` deliberately never refreshes itself.
 `serve.run_refresh` rewrites it instead, with `live=False`, and only on a poll
 that changed the hand count or found the file missing: most polls find nothing,
-and rendering the dashboard for a file nobody reloaded is the waste. `Refresh
+and rendering the dashboard for a file nobody reloaded is the waste. The same
+poll renders the live page from that one pass (`report.build_pages`) and caches
+it, so the reload that follows is served rather than rendered again; the cache
+is keyed on hand count, hero and today's date, because "Today" moves at
+midnight. A poll that imported nothing skips `derive.rebuild` too, unless the
+hand count moved since this process last derived (a `cli refresh` beside the
+server). The first poll after start-up always derives. `Refresh
 report.cmd` is the same thing without the server. The live page
 polls `/api/refresh` every 60 seconds and reloads *only* when the poll reports
 new hands, so a reader mid-scroll is not thrown back to the top on every tick;

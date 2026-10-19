@@ -1792,5 +1792,104 @@ class TestServeKeepsTheFileCurrent(unittest.TestCase):
         self.assertFalse(self.out.exists())
 
 
+class TestServeDoesNoRepeatWork(unittest.TestCase):
+    """An empty poll derives nothing, and new hands render the dashboard once.
+
+    A poll that found new hands used to render it twice -- the file, then the
+    live page again when it reloaded -- and every empty poll rebuilt
+    hand_player from scratch.
+    """
+
+    def setUp(self):
+        from pokertracker import report, serve
+        self.serve, self.report = serve, report
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        tmp = Path(self.dir.name)
+        self.root = tmp / "history"
+        self.root.mkdir()
+        self.db = str(tmp / "poker.db")
+        self.out = tmp / "report.html"
+        self._deal("six_handed")
+        self.derives = 0
+        real = derive.rebuild
+
+        def counting(*args, **kwargs):
+            self.derives += 1
+            return real(*args, **kwargs)
+
+        derive.rebuild = counting
+        self.addCleanup(setattr, derive, "rebuild", real)
+
+    def _deal(self, name):
+        (self.root / f"{name}.txt").write_text(
+            (FIXTURES / f"{name}.txt").read_text(encoding="utf-8"),
+            encoding="utf-8")
+
+    def _refresh(self):
+        return self.serve.run_refresh(self.db, str(self.root),
+                                      output=str(self.out))
+
+    def _no_render(self):
+        """Fail the test if anything renders the dashboard from here on."""
+        def boom(*args, **kwargs):
+            raise AssertionError("rendered again")
+        real = self.report.build_pages
+        self.report.build_pages = boom
+        self.addCleanup(setattr, self.report, "build_pages", real)
+
+    def test_an_empty_poll_does_not_derive(self):
+        self._refresh()
+        self.assertEqual(self.derives, 1)
+        self._refresh()
+        self.assertEqual(self.derives, 1)
+        self._deal("heads_up")
+        self._refresh()
+        self.assertEqual(self.derives, 2)
+
+    def test_hands_imported_elsewhere_are_derived(self):
+        """A `cli refresh` beside the server imports hands this process never
+        saw arrive; the next poll finds nothing new and must derive anyway."""
+        self._refresh()
+        self._deal("heads_up")
+        conn = db.connect(self.db)
+        db.import_paths(conn, db.discover(str(self.root)))
+        conn.close()
+        self.assertEqual(self._refresh()["new_hands"], 0)
+        self.assertEqual(self.derives, 2)
+
+    def test_the_reload_after_new_hands_is_served_from_the_refresh(self):
+        self._refresh()
+        self._no_render()
+        page = self.serve._live_page(self.db, "")
+        self.assertIn(b'id="refresh-status"', page)
+        self.assertNotIn('id="refresh-status"',
+                         self.out.read_text(encoding="utf-8"))
+
+    def test_the_cached_page_goes_when_the_hands_move(self):
+        self._refresh()
+        first = self.serve._live_page(self.db, "")
+        self._deal("heads_up")
+        conn = db.connect(self.db)
+        db.import_paths(conn, db.discover(str(self.root)))
+        derive.rebuild(conn)
+        conn.close()
+        second = self.serve._live_page(self.db, "")
+        self.assertNotEqual(first, second)
+        self._no_render()
+        self.assertEqual(self.serve._live_page(self.db, ""), second)
+
+    def test_one_render_makes_both_pages(self):
+        conn = db.connect(self.db)
+        db.import_paths(conn, db.discover(str(self.root)))
+        derive.rebuild(conn)
+        hero = db.detect_hero(conn)
+        pages = self.report.build_pages(conn, hero)
+        conn.close()
+        self.assertNotIn('id="refresh-status"', pages[False])
+        self.assertIn('id="refresh-status"', pages[True])
+        self.assertIn('class="live"', pages[True])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

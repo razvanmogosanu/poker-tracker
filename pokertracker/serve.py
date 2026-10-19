@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import date
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +26,26 @@ from . import db, derive, equity, ranges, report, solver
 # Only one refresh may run at a time: two concurrent imports would fight over
 # the same rows, and the pipeline is fast enough that queueing is fine.
 _refresh_lock = threading.Lock()
+
+# The hand count each database's hand_player was last derived at, by this
+# process. A poll that imported nothing, against a database nobody else wrote
+# to, has nothing to derive -- and rebuilding hand_player was most of what an
+# empty poll cost. The first poll after start-up always derives, so a server
+# started on new code never reports figures from the old definitions.
+_derived: dict[str, int] = {}
+
+# The live page, rendered once per state of the database rather than once per
+# GET. Taken after _refresh_lock when both are held, never before it.
+_page_lock = threading.Lock()
+_pages: dict[str, tuple[tuple, bytes]] = {}
+
+
+def _page_key(conn, hero: str) -> tuple:
+    """What the live page depends on besides code: the hands, whose they are,
+    and the date -- "Today" and "Last 7 days" are anchored on the clock, so a
+    page rendered before midnight describes the wrong days after it."""
+    n = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
+    return (n, hero, date.today())
 
 
 def run_refresh(db_path: str, root: str, hero_hint: str = "",
@@ -41,19 +62,36 @@ def run_refresh(db_path: str, root: str, hero_hint: str = "",
             before = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
             paths = db.discover(root)
             res = db.import_paths(conn, paths, hero_hint=hero_hint)
-            derive.rebuild(conn)
-            ev_rows = equity.compute_all(conn)
             after = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
+            # `after != before` catches a database deleted and re-imported to
+            # the same count; the second test catches a `cli refresh` run
+            # beside the server, whose hands this process never imported.
+            ev_rows = 0
+            if after != before or _derived.get(db_path) != after:
+                derive.rebuild(conn)
+                ev_rows = equity.compute_all(conn)
+                _derived[db_path] = after
             problems = conn.execute("SELECT COUNT(*) n FROM problems").fetchone()["n"]
             # Only when the hands changed: the poll runs every 60 seconds and
             # most of them find nothing, which is no reason to render and write
             # the whole dashboard again. It is the static page that is written,
             # not the live one -- a file:// page still cannot poll anything.
+            #
+            # New hands also mean the live page is about to reload, so it is
+            # rendered here from the same pass and cached for the GET that
+            # follows, rather than rendered all over again when it arrives.
             written = False
-            if output and (after != before or not Path(output).exists()):
+            write_file = bool(output) and (after != before
+                                           or not Path(output).exists())
+            if write_file or after != before:
                 who = hero_hint or db.detect_hero(conn)
-                Path(output).write_text(report.build(conn, who), encoding="utf-8")
-                written = True
+                with _page_lock:
+                    pages = report.build_pages(conn, who)
+                    _pages[db_path] = (_page_key(conn, who),
+                                       pages[True].encode("utf-8"))
+                if write_file:
+                    Path(output).write_text(pages[False], encoding="utf-8")
+                    written = True
             return {
                 "ok": True,
                 "new_hands": after - before,
@@ -65,6 +103,27 @@ def run_refresh(db_path: str, root: str, hero_hint: str = "",
                 "report_written": written,
                 "elapsed": round(time.time() - started, 1),
             }
+        finally:
+            conn.close()
+
+
+def _live_page(db_path: str, hero: str) -> bytes:
+    """The live page, from the cache when nothing it depends on has moved.
+
+    Holding the lock while rendering is deliberate: a second request arriving
+    mid-render waits and gets the cached copy instead of rendering it again.
+    """
+    with _page_lock:
+        conn = db.connect(db_path)
+        try:
+            who = hero or db.detect_hero(conn)
+            key = _page_key(conn, who)
+            cached = _pages.get(db_path)
+            if cached and cached[0] == key:
+                return cached[1]
+            body = report.build(conn, who, live=True).encode("utf-8")
+            _pages[db_path] = (key, body)
+            return body
         finally:
             conn.close()
 
@@ -126,13 +185,7 @@ def make_handler(db_path: str, root: str, hero: str, output: str = ""):
             if path not in ("/", "/index.html"):
                 self._send(b"not found", "text/plain; charset=utf-8", 404)
                 return
-            conn = db.connect(db_path)
-            try:
-                who = hero or db.detect_hero(conn)
-                html = report.build(conn, who, live=True)
-            finally:
-                conn.close()
-            self._send(html.encode("utf-8"), "text/html; charset=utf-8")
+            self._send(_live_page(db_path, hero), "text/html; charset=utf-8")
 
         def do_POST(self):  # noqa: N802
             path = self.path.split("?")[0]
