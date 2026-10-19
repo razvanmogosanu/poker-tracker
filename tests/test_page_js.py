@@ -59,7 +59,11 @@ const document = Object.assign(el(), {
   documentElement: el(), body: el(),
   getElementById(id) {
     if (id === 'period-data') return payload;
-    if (sc.regionIds.includes(id)) return regions[id] || (regions[id] = el());
+    if (sc.regionIds.includes(id)) {
+      // A region opens holding the "all" markup, which the page reads back.
+      if (!regions[id]) { regions[id] = el(); regions[id].innerHTML = sc.opening[id]; }
+      return regions[id];
+    }
     return null;
   },
   createElement: el, createElementNS: el, dispatchEvent() {},
@@ -101,14 +105,19 @@ class TestPeriodRestore(unittest.TestCase):
         """Load the page once with this sessionStorage; what did it restore?"""
         bands = self.BANDS if bands is None else bands
         keys = ["all", *bands]
+        # The shape report.build_pages ships: "all" is not in the payload,
+        # it is the page's own markup, named by `ids`.
         data = {
             "periods": [{"key": k, "band": bands.get(k)} for k in keys],
-            "regions": {k: {"r-main": f"<p>{k}</p>"} for k in keys},
+            "ids": ["r-main"],
+            "regions": {k: {"r-main": f"<p>{k}</p>"} for k in keys if k != "all"},
             "raws": {},
         }
         path = self.tmp / f"{self.id()}.json"
         path.write_text(json.dumps({"storage": storage, "data": data,
-                                    "regionIds": ["r-main"]}), encoding="utf-8")
+                                    "regionIds": ["r-main"],
+                                    "opening": {"r-main": "<p>all</p>"}}),
+                        encoding="utf-8")
         out = subprocess.run([NODE, str(self.harness), str(self.src), str(path)],
                              capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 0, out.stderr)
