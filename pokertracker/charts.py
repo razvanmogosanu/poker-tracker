@@ -159,6 +159,31 @@ def stack_labels(targets: list[float], lo: float, hi: float,
     return out
 
 
+def envelope(values, buckets: int) -> list[int]:
+    """Indices of each bucket's minimum and maximum, in order, plus the last.
+
+    A line with more points than the chart has horizontal room for is drawn
+    over itself: twenty thousand hands across a 740-unit plot is two dozen
+    points per unit, and all the eye can see in each column is its highest and
+    lowest value. Keeping exactly those keeps every peak and trough the full
+    line has, at a fraction of the bytes. The last point is always kept, so
+    the line still ends where its direct label says it does.
+    """
+    n = len(values)
+    if n <= 2 * buckets:
+        return list(range(n))
+    keep = []
+    for b in range(buckets):
+        lo, hi = b * n // buckets, (b + 1) * n // buckets
+        seg = range(lo, hi)
+        i_min = min(seg, key=values.__getitem__)
+        i_max = max(seg, key=values.__getitem__)
+        keep.extend(sorted({i_min, i_max}))
+    if keep[-1] != n - 1:
+        keep.append(n - 1)
+    return keep
+
+
 def svg(body: str, w=W, h=H, cls="chart") -> str:
     return (f'<svg class="{cls}" viewBox="0 0 {w} {h}" '
             f'preserveAspectRatio="xMidYMid meet" role="img">{body}</svg>')
@@ -213,8 +238,10 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
     # spread apart where two lines finish on top of each other.
     label_ys = stack_labels([f.sy(vals[-1]) + 4 for _, vals, _, _ in series],
                             f.top, f.bottom)
+    buckets = int(f.right - f.left)
     for (name, vals, key, dash), label_y in zip(series, label_ys):
-        pts = " ".join(f"{f.sx(i + 1):.1f},{f.sy(v):.1f}" for i, v in enumerate(vals))
+        pts = " ".join(f"{f.sx(i + 1):.1f},{f.sy(vals[i]):.1f}"
+                       for i in envelope(vals, buckets))
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
         out.append(f'<polyline class="line {key}" points="{pts}"{dash_attr}/>')
         out.append(
@@ -222,14 +249,22 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
             f'y="{label_y:.1f}">{esc(name)}</text>'
         )
 
+    # The tooltip carries every `step`-th hand rather than every hand: the
+    # mouse cannot land on one hand in twenty-five at this width, and the full
+    # set was over half a megabyte of the report. The last sample is clamped to
+    # the last hand, so hovering the end of the line reads the final total.
+    step = max(1, math.ceil(n / buckets))
+    samples = [min(j * step, n - 1) for j in range(math.ceil((n - 1) / step) + 1)]
     payload = json.dumps({
         "left": f.left, "right": f.right, "top": f.top, "bottom": f.bottom,
         # The x axis is padded out to a round tick past the last hand, so the
-        # period band needs the domain to place itself, not just the pixels.
-        "n": n, "x0": f.x0, "x1": f.x1,
-        "series": [{"name": nm, "key": k, "values": [round(v, 2) for v in vals]}
+        # period band and the crosshair need the domain to place themselves,
+        # not just the pixels.
+        "n": n, "x0": f.x0, "x1": f.x1, "step": step,
+        "series": [{"name": nm, "key": k,
+                    "values": [round(vals[i], 1) for i in samples]}
                    for nm, vals, k, _ in series],
-    })
+    }, separators=(",", ":"))
     out.append(f'<line class="crosshair" x1="0" y1="{f.top}" x2="0" '
                f'y2="{f.bottom}" style="display:none"/>')
     out.append(f'<rect class="hover-target" x="{f.left}" y="{f.top}" '
@@ -300,7 +335,8 @@ def _grid_cells(side: str) -> str:
             y = pad + row * cell
             shape = "pair" if row == col else ("suited" if row < col else "offsuit")
             cells.append(
-                f'<g class="cellg" data-combo="{combo}" data-side="{side}">'
+                f'<g class="cellg" data-combo="{combo}" data-i="{row * 13 + col}" '
+                f'data-side="{side}">'
                 f'<rect class="cell {shape}" x="{x}" y="{y}" width="{cell - 2}" '
                 f'height="{cell - 2}" rx="3"/>'
                 f'<text class="cell-label" x="{x + (cell - 2) / 2:.1f}" '
@@ -320,9 +356,10 @@ def range_heatmap(period_grids: dict, positions) -> str:
     one shared scale, because two grids on independent scales would show a
     difference in colour that is not a difference in the data.
 
-    Cells arrive as compact `[n, vpip, bb100]` triples rather than named
-    objects. Every period carries a grid per position for both panels, and the
-    field names cost more bytes than the numbers do.
+    Cells arrive as compact `[n, vpip, bb100]` triples in `cards.all_combos()`
+    order, 0 for a combo never dealt, rather than objects keyed by combo. Every
+    period carries a grid per position for both panels, and inside an HTML
+    attribute each quoted key costs twelve bytes of `&quot;` on its own.
     """
     options = "".join(
         f'<button type="button" class="chip" data-pos="{esc(k)}">{esc(k)}</button>'
@@ -335,7 +372,8 @@ def range_heatmap(period_grids: dict, positions) -> str:
         '<div class="panel-head">Prior</div>' + _grid_cells("pri") + '</div>'
     )
     return (
-        '<div class="heatmap" data-payload="' + esc(json.dumps(period_grids)) + '">'
+        '<div class="heatmap" data-payload="'
+        + esc(json.dumps(period_grids, separators=(",", ":"))) + '">'
         '<div class="chip-row" role="group" aria-label="Filter by position">'
         '<span class="chip-label">Position</span>' + options + '</div>'
         '<div class="chip-row" role="group" aria-label="Colour metric">'

@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 
 from . import charts, db, handclass, ranges, solver, stats
-from .cards import RANK_CHARS, grid_cell
+from .cards import RANK_CHARS, all_combos, grid_cell
 from .charts import esc, fmt
 from .positions import POSITION_ORDER
 
@@ -421,24 +421,29 @@ JS = """
     const d = JSON.parse(wrap.dataset.payload);
     const svg = $('svg', wrap), tip = $('.tooltip', wrap);
     const hair = $('.crosshair', wrap), target = $('.hover-target', wrap);
-    const n = d.series[0].values.length;
-    if (!n) return;
+    const m = d.series[0].values.length;
+    if (!m) return;
     function toUser(ev) {
       const pt = svg.createSVGPoint();
       pt.x = ev.clientX; pt.y = ev.clientY;
       return pt.matrixTransform(svg.getScreenCTM().inverse());
     }
+    // Hand h is drawn at h on an axis padded past the last hand, so the
+    // mouse maps through the domain, not across the full plot width.
+    const span = Math.max(1, d.x1 - d.x0), width = d.right - d.left;
     target.addEventListener('mousemove', function (ev) {
       const u = toUser(ev);
-      const frac = (u.x - d.left) / (d.right - d.left);
-      const i = Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1))));
-      const x = d.left + (i / Math.max(1, n - 1)) * (d.right - d.left);
+      const hand = d.x0 + ((u.x - d.left) / width) * span;
+      // values[j] is hand j * step + 1, the last one clamped to hand n.
+      const j = Math.max(0, Math.min(m - 1, Math.round((hand - 1) / d.step)));
+      const i = Math.min(j * d.step, d.n - 1);
+      const x = d.left + ((i + 1 - d.x0) / span) * width;
       hair.setAttribute('x1', x); hair.setAttribute('x2', x);
       hair.style.display = '';
       tip.hidden = false;
       tip.innerHTML = '<b>Hand ' + (i + 1) + '</b><br>' + d.series.map(function (s) {
         return '<span class="sw" style="background:var(--' + s.key + ')"></span>' +
-               s.name + ' <b>' + s.values[i].toFixed(1) + ' bb</b>';
+               s.name + ' <b>' + s.values[j].toFixed(1) + ' bb</b>';
       }).join('<br>');
       place(tip, wrap, ev);
     });
@@ -482,12 +487,13 @@ JS = """
     const selHead = $('.panel[data-side="sel"] .panel-head', wrap);
     let pos = 'All', metric = 'freq';
 
-    // Cells arrive as [n, vpip, bb100]; the field names cost more than the
-    // numbers, and every period carries a grid for both panels.
-    function cellOf(side, combo) {
+    // Cells arrive as [n, vpip, bb100] in grid order, indexed by data-i; the
+    // field names and combo keys cost more than the numbers, and every period
+    // carries a grid for both panels.
+    function cellOf(side, i) {
       const p = data[PERIOD] || data.all || {};
-      const g = (p[side] || {})[pos] || {};
-      const v = g[combo];
+      const g = (p[side] || {})[pos] || [];
+      const v = g[i];
       if (!v || !v[0]) return null;
       return { n: v[0], vpip: v[1], freq: 100 * v[1] / v[0], bb100: v[2] };
     }
@@ -506,11 +512,9 @@ JS = """
       // the grey midpoint. Cells past the end saturate, and the legend says so.
       const mags = [];
       sides.forEach(function (side) {
-        const g = (p[side] || {})[pos] || {};
-        Object.keys(g).forEach(function (k) {
-          const v = g[k][2];
-          if (!g[k][0] || 100 * g[k][1] / g[k][0] < RARELY_PLAYED) return;
-          if (v !== null && v !== undefined) mags.push(Math.abs(v));
+        ((p[side] || {})[pos] || []).forEach(function (c) {
+          if (!c || !c[0] || 100 * c[1] / c[0] < RARELY_PLAYED) return;
+          if (c[2] !== null && c[2] !== undefined) mags.push(Math.abs(c[2]));
         });
       });
       mags.sort((a, b) => a - b);
@@ -518,7 +522,7 @@ JS = """
         ? mags[Math.min(mags.length - 1, Math.floor(SCALE_PCTILE * mags.length))] : 1);
 
       $$('.cellg', wrap).forEach(function (cell) {
-        const d = cellOf(cell.dataset.side, cell.dataset.combo);
+        const d = cellOf(cell.dataset.side, +cell.dataset.i);
         const rect = $('rect', cell), label = $('text', cell);
         const value = d ? d[metric] : null;
         // Inline style, not the fill attribute: a presentation attribute loses
@@ -570,7 +574,7 @@ JS = """
 
     $$('.cellg', wrap).forEach(function (cell) {
       cell.addEventListener('mousemove', function (ev) {
-        const d = cellOf(cell.dataset.side, cell.dataset.combo);
+        const d = cellOf(cell.dataset.side, +cell.dataset.i);
         const which = cell.dataset.side === 'pri' ? 'prior' : 'selected';
         tip.hidden = false;
         tip.innerHTML = '<b>' + cell.dataset.combo + '</b> &middot; ' + pos +
@@ -664,6 +668,13 @@ JS = """
   const periodData = document.getElementById('period-data');
   if (periodData) {
     const D = JSON.parse(periodData.textContent);
+    // "All" is the markup the page opened with, so it is read back from the
+    // page rather than shipped a second time. Nothing has been swapped yet.
+    D.regions.all = {};
+    D.ids.forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) D.regions.all[id] = el.innerHTML;
+    });
     RAWS = D.raws || {};
     D.periods.forEach(function (p) { if (p.band) BANDS[p.key] = p.band; });
 
@@ -1585,11 +1596,12 @@ averaging them together flatters the bluffs and punishes the semi-bluffs.</p>
 </div>"""
 
 
-def _compact_grid(grid: dict) -> dict:
-    """[n, vpip, bb100] per combo. See the note in charts.range_heatmap."""
-    return {c: [v["n"], v["vpip"],
-                None if v["bb100"] is None else round(v["bb100"], 1)]
-            for c, v in grid.items()}
+def _compact_grid(grid: dict) -> list:
+    """[n, vpip, bb100] per cell, 0 if never dealt. See charts.range_heatmap."""
+    return [[v["n"], v["vpip"],
+             None if v["bb100"] is None else round(v["bb100"], 1)]
+            if (v := grid.get(c)) else 0
+            for c in all_combos()]
 
 
 def _rate_of(rows, name: str):
@@ -1942,8 +1954,11 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
                      "hands": period.selected.hands, "band": band})
 
     raws = db.hand_texts(conn, sorted(set(hand_ids)))
+    # "all" is left out: it is the page's own markup, and the browser reads it
+    # back from the region ids rather than carrying the same fragments twice.
     payload = _json_script(
-        {"periods": meta, "regions": regions,
+        {"periods": meta, "ids": list(regions["all"]),
+         "regions": {k: v for k, v in regions.items() if k != "all"},
          "raws": {str(k): v for k, v in raws.items()}},
         "period-data")
 
