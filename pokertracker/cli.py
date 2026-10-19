@@ -13,8 +13,19 @@ DEFAULT_DB = Path(__file__).resolve().parents[1] / "poker.db"
 DEFAULT_JOURNAL = review.DEFAULT_JOURNAL
 
 
+def _connect(args):
+    """The command's one connection, opened on first use and closed by main().
+
+    Cached on `args` so a command that runs another one (refresh runs import)
+    shares it rather than opening a second.
+    """
+    if getattr(args, "conn", None) is None:
+        args.conn = db.connect(args.db)
+    return args.conn
+
+
 def cmd_import(args) -> int:
-    conn = db.connect(args.db)
+    conn = _connect(args)
     paths = db.discover(args.root)
     if not paths:
         print(f"no .txt files under {args.root}", file=sys.stderr)
@@ -38,7 +49,7 @@ def cmd_refresh(args) -> int:
     rc = cmd_import(args)
     if rc:
         return rc
-    conn = db.connect(args.db)
+    conn = _connect(args)
     from . import equity, report
 
     n = equity.compute_all(conn, force=False, progress=True)
@@ -54,7 +65,7 @@ def cmd_refresh(args) -> int:
 def cmd_serve(args) -> int:
     from . import serve as serve_mod
 
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     conn.close()
     serve_mod.serve(args.db, args.root, hero, args.port, not args.no_open,
@@ -71,7 +82,7 @@ def cmd_solve(args) -> int:
 
     try:
         if args.hand:
-            conn = db.connect(args.db)
+            conn = _connect(args)
             spec = solver.from_hand(conn, args.hero or db.detect_hero(conn),
                                     args.hand, args.street)
             # A real hand supplies whatever was not given on the command line.
@@ -95,7 +106,7 @@ def cmd_solve(args) -> int:
 
 
 def cmd_derive(args) -> int:
-    conn = db.connect(args.db)
+    conn = _connect(args)
     n = derive.rebuild(conn)
     print(f"rebuilt {n} hand_player rows")
     return 0
@@ -117,7 +128,7 @@ def _fmt_delta(new, old, unit: str, enough: bool) -> str:
 
 
 def cmd_stats(args) -> int:
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     if not hero:
         print("no hands imported yet", file=sys.stderr)
@@ -192,12 +203,14 @@ def cmd_stats(args) -> int:
     print("-" * 68)
     print(f"  {'POS':<5}{'HANDS':>7}{'VPIP':>8}{'PFR':>8}{'3BET':>8}{'BB/100':>10}"
           f"{'95% CI':>12}")
+    def pct(v):
+        return "-" if v is None else f"{v:.1f}"
+
     for r in stats.by_position(conn, hero, w):
+        ci = f"+/-{r['ci95']:.0f}"
         print(f"  {r['position']:<5}{r['hands']:>7}"
-              f"{(f'{r['vpip']:.1f}' if r['vpip'] is not None else '-'):>8}"
-              f"{(f'{r['pfr']:.1f}' if r['pfr'] is not None else '-'):>8}"
-              f"{(f'{r['threebet']:.1f}' if r['threebet'] is not None else '-'):>8}"
-              f"{r['bb100']:>10.1f}{('+/-' + f'{r['ci95']:.0f}'):>12}")
+              f"{pct(r['vpip']):>8}{pct(r['pfr']):>8}{pct(r['threebet']):>8}"
+              f"{r['bb100']:>10.1f}{ci:>12}")
 
     print("\nCompliance")
     print("-" * 68)
@@ -308,7 +321,7 @@ def cmd_stats(args) -> int:
 def cmd_ev(args) -> int:
     from . import equity
 
-    conn = db.connect(args.db)
+    conn = _connect(args)
     n = equity.compute_all(conn, force=args.force, progress=True)
     print(f"all-in EV computed for {n} hand/player rows")
     return 0
@@ -317,7 +330,7 @@ def cmd_ev(args) -> int:
 def cmd_report(args) -> int:
     from . import report
 
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     out = Path(args.output)
     html = report.build(conn, hero)
@@ -330,7 +343,7 @@ def cmd_export(args) -> int:
     """The whole dashboard as JSON, for a reader that wants the numbers."""
     import json
 
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     if not hero:
         print("no hands imported yet", file=sys.stderr)
@@ -360,7 +373,7 @@ def _fmt_value(v, unit: str) -> str:
 
 
 def cmd_review_add(args) -> int:
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     rec = review.add(conn, hero, args.title, args.metric,
                      args.target, args.note, args.journal)
@@ -389,7 +402,7 @@ def cmd_review_list(args) -> int:
 
 def cmd_review_status(args) -> int:
     """Every open finding, re-measured over the hands played since it was made."""
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     rows = review.status(conn, hero, args.journal, args.all)
     if not rows:
@@ -461,7 +474,7 @@ def _hand_filter(metric: str) -> tuple[str, list]:
 
 def cmd_hands(args) -> int:
     """Real hands matching a metric -- the raw material for a drill-down."""
-    conn = db.connect(args.db)
+    conn = _connect(args)
     hero = args.hero or db.detect_hero(conn)
     try:
         where, params = _hand_filter(args.metric)
@@ -652,6 +665,7 @@ def main(argv=None) -> int:
     r.set_defaults(func=cmd_review_close)
 
     args = p.parse_args(argv)
+    args.conn = None
     try:
         return args.func(args)
     except (db.StaleSchema, review.JournalError, brief.UnknownMetric) as e:
@@ -660,6 +674,9 @@ def main(argv=None) -> int:
         # beats a message that scrolls past.
         print(f"error: {e}", file=sys.stderr)
         return 2
+    finally:
+        if args.conn is not None:
+            args.conn.close()
 
 
 if __name__ == "__main__":

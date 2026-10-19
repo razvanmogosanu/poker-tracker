@@ -12,7 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from . import handclass
-from .positions import POSITION_ORDER, sort_key
+from .positions import sort_key
 
 # Standard deviation for 6-max NLHE is roughly 85-100 bb/100. Used only as a
 # fallback when there are too few hands to estimate it from the data.
@@ -44,16 +44,6 @@ class Rate:
         ci = self.ci
         return {"name": self.name, "num": self.num, "den": self.den, "pct": self.pct,
                 "ci_lo": ci[0] if ci else None, "ci_hi": ci[1] if ci else None}
-
-
-def _hero(conn: sqlite3.Connection, hero: str | None) -> str:
-    if hero:
-        return hero
-    row = conn.execute(
-        "SELECT player, COUNT(*) n FROM hand_player WHERE is_hero = 1"
-        " GROUP BY player ORDER BY n DESC LIMIT 1"
-    ).fetchone()
-    return row["player"] if row else ""
 
 
 # --------------------------------------------------------------------------

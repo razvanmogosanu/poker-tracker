@@ -149,10 +149,3 @@ def evaluate(cards: np.ndarray) -> np.ndarray:
     tie = np.select(conditions, ties, default=tie_high).astype(np.int32)
     assert cat.shape == (n,)
     return (cat << 20) | tie
-
-
-def evaluate_chunked(cards: np.ndarray, chunk: int = 200_000) -> np.ndarray:
-    out = np.empty(cards.shape[0], dtype=np.int32)
-    for start in range(0, cards.shape[0], chunk):
-        out[start:start + chunk] = evaluate(cards[start:start + chunk])
-    return out
