@@ -21,7 +21,7 @@ python -m pokertracker.cli export             # the whole dashboard as JSON
 python -m pokertracker.cli review status      # open findings, re-measured
 python -m pokertracker.cli hands --metric stat:fold_to_3bet --limit 5 --text
 
-python -m unittest discover -s tests                          # all tests (~20s)
+python -m unittest discover -s tests                          # all tests (~45s)
 python -m unittest tests.test_tracker                         # one module
 python -m unittest tests.test_tracker.TestPositions           # one class
 python -m unittest tests.test_equity.TestEquity.test_aces_versus_kings_preflop
@@ -453,6 +453,11 @@ change the palette.
 
 `TARGETS` at the top of `report.py` are strategy reference lines drawn on the
 rolling-discipline chart, not measurements.
+
+The stylesheet and the three scripts (`report.JS`, `LIVE_JS`, `SOLVER_JS`) are
+real files in `pokertracker/static/`, read at import and inlined by `build()`,
+so the page stays one self-contained file. They are plain text, not Python
+strings: a CSS escape is `\2195`, not `\\2195`.
 
 **Every period is rendered server-side and swapped in the browser.** The report
 has to open from `file://` with no server behind it, so recomputing on selection

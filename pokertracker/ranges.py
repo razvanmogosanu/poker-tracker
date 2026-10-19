@@ -26,7 +26,7 @@ import re
 
 import numpy as np
 
-from .cards import RANK_CHARS, RANK_OF, all_combos, hole_notation
+from .cards import RANK_CHARS, RANK_OF, all_combos
 
 CELLS = all_combos()            # grid order: row by row, aces first
 _CELL_SET = frozenset(CELLS)
@@ -213,11 +213,6 @@ def combos(cells, dead=()) -> np.ndarray:
            for pair in _cell_combos(cell)
            if pair[0] not in gone and pair[1] not in gone]
     return np.array(out, dtype=np.int32).reshape(-1, 2)
-
-
-def cell_of(pair) -> str:
-    """The grid cell a concrete holding belongs to."""
-    return hole_notation([int(pair[0]), int(pair[1])])
 
 
 def preset(key: str) -> frozenset[str]:

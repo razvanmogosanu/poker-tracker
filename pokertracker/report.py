@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 from . import charts, db, handclass, ranges, solver, stats
 from .cards import RANK_CHARS, all_combos, grid_cell
@@ -24,1153 +25,28 @@ TARGETS = {"vpip": 22.0, "pfr": 18.0, "threebet": 7.0, "btn_open": 45.0}
 PREFLOP_ARRIVING_BB = 5.0
 PREFLOP_CHOSEN_BB = 10.0
 
-CSS = """
-:root {
-  color-scheme: light;
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --muted: #898781;
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
-  --border: rgba(11,11,11,0.10);
-  --total: #008300;
-  --showdown: #2a78d6;
-  --nonshowdown: #e34948;
-  --ev: #898781;
-  --s1: #2a78d6;
-  --s2: #eb6834;
-  --s3: #1baf7a;
-  --pos: #2a78d6;
-  --neg: #e34948;
-  --good: #0ca30c;
-  --warn: #fab219;
-  --bad: #d03b3b;
-  --seq: #2a78d6;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --ink: #ffffff;
-    --ink-2: #c3c2b7;
-    --muted: #898781;
-    --grid: #2c2c2a;
-    --axis: #383835;
-    --border: rgba(255,255,255,0.10);
-    --total: #008300;
-    --showdown: #3987e5;
-    --nonshowdown: #e66767;
-    --ev: #898781;
-    --s1: #3987e5;
-    --s2: #d95926;
-    --s3: #199e70;
-    --pos: #3987e5;
-    --neg: #e66767;
-    --seq: #3987e5;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --ink: #ffffff;
-  --ink-2: #c3c2b7;
-  --muted: #898781;
-  --grid: #2c2c2a;
-  --axis: #383835;
-  --border: rgba(255,255,255,0.10);
-  --total: #008300;
-  --showdown: #3987e5;
-  --nonshowdown: #e66767;
-  --ev: #898781;
-  --s1: #3987e5;
-  --s2: #d95926;
-  --s3: #199e70;
-  --pos: #3987e5;
-  --neg: #e66767;
-  --seq: #3987e5;
-}
 
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  padding: 28px 20px 80px;
-  background: var(--page);
-  color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-.wrap { max-width: 1040px; margin: 0 auto; }
-h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
-h2 { font-size: 19px; margin: 40px 0 6px; letter-spacing: -0.01em; }
-h3 { font-size: 15px; margin: 22px 0 6px; color: var(--ink-2); }
-p.sub { color: var(--ink-2); margin: 0 0 20px; }
-p.note { color: var(--ink-2); font-size: 13.5px; margin: 6px 0 14px; max-width: 74ch; }
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 18px;
-  margin: 14px 0;
-  overflow-x: auto;
-}
-.tiles { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 12px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-.tile .k { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.tile .v { font-size: 27px; font-weight: 600; margin-top: 4px; letter-spacing: -0.02em; }
-.tile .m { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
-svg.chart { width: 100%; height: auto; display: block; overflow: visible; }
-svg.grid13 { max-width: 500px; margin: 6px auto; }
-.grid { stroke: var(--grid); stroke-width: 1; }
-.grid.zero { stroke: var(--axis); }
-.axis { stroke: var(--axis); stroke-width: 1; }
-.tick { fill: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.tick.small { font-size: 10px; }
-.axis-label { fill: var(--ink-2); font-size: 12px; }
-.line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.line.total { stroke: var(--total); stroke-width: 2.5; }
-.line.showdown { stroke: var(--showdown); }
-.line.nonshowdown { stroke: var(--nonshowdown); }
-.line.ev { stroke: var(--ev); stroke-width: 1.5; }
-.line.s1 { stroke: var(--s1); } .line.s2 { stroke: var(--s2); } .line.s3 { stroke: var(--s3); }
-.direct-label { font-size: 11.5px; fill: var(--ink-2); }
-.target { stroke-width: 1.5; stroke-dasharray: 2 4; opacity: .7; }
-.target.s1 { stroke: var(--s1); } .target.s2 { stroke: var(--s2); }
-.target.s3 { stroke: var(--s3); } .target.ref { stroke: var(--muted); }
-.bar.pos { fill: var(--pos); } .bar.neg { fill: var(--neg); }
-.dot.pos { fill: var(--pos); } .dot.neg { fill: var(--neg); }
-.dot { stroke: var(--surface); stroke-width: 2; }
-.ci { stroke: var(--ink-2); stroke-width: 1.5; opacity: .75; }
-.funnel { fill: var(--seq); }
-.funnel.step0 { opacity: 1; } .funnel.step1 { opacity: .85; }
-.funnel.step2 { opacity: .7; } .funnel.step3 { opacity: .55; }
-.funnel.step4 { opacity: .42; }
-.funnel-label { fill: var(--ink); font-size: 13px; }
-.funnel-value { fill: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
-.funnel-money { font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.funnel-money.pos { fill: var(--pos); } .funnel-money.neg { fill: var(--neg); }
-.hover-target { fill: transparent; }
-.crosshair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
-.chart-wrap, .heatmap { position: relative; }
-.tooltip {
-  position: absolute; pointer-events: none; z-index: 5;
-  background: var(--surface); color: var(--ink);
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px 10px; font-size: 12.5px; line-height: 1.45;
-  box-shadow: 0 6px 20px rgba(0,0,0,.18); white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.tooltip b { font-weight: 600; }
-.tooltip .sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; }
-.legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 10px 0 2px; font-size: 13px; color: var(--ink-2); }
-.legend span { display: inline-flex; align-items: center; gap: 7px; }
-.legend i { width: 22px; height: 0; border-top-width: 2.5px; border-top-style: solid; display: inline-block; }
-table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
-/* Ten columns in three groups of three read as one blur without a rule
-   between the groups; the divider is on the first cell of each group. */
-.grp { border-left: 1px solid var(--border); }
-th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
-th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
-th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-tbody tr:last-child td { border-bottom: none; }
-td.ci { color: var(--muted); font-size: 12.5px; }
-td.thin { color: var(--muted); }
-.pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
-.pill.good { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
-.pill.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--ink); }
-.pill.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
-.pill.none { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--ink-2); }
-/* "n too small" is not a soft failure and must not borrow the failure colour. */
-.pill.thin { background: transparent; color: var(--muted); border: 1px dashed var(--border); }
-.chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
-.chip-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-right: 4px; }
-.chip {
-  font: inherit; font-size: 12.5px; padding: 3px 11px; border-radius: 999px; cursor: pointer;
-  background: transparent; color: var(--ink-2); border: 1px solid var(--border);
-}
-.chip:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
-.chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-.cell { fill: var(--surface); stroke: var(--border); stroke-width: 1; }
-.cell-label { font-size: 9.5px; fill: var(--ink-2); pointer-events: none; }
-.cellg { cursor: default; }
-.scale-legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); justify-content: center; margin-top: 6px; }
-.scale-legend .ramp { display: flex; }
-.scale-legend .ramp i { width: 16px; height: 10px; display: block; }
-.panels { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
-.panels .panel { flex: 1 1 320px; max-width: 500px; }
-.panel-head { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
-  color: var(--muted); text-align: center; margin-bottom: 2px; }
-/* The shaded period on the cumulative charts. Neutral ink rather than an
-   accent colour: it marks an extent, it is not a fifth data series. */
-.period-band { fill: var(--ink); opacity: .07; }
-/* A delta is never coloured by sign. Donk flop falling six points is not good
-   news or bad news until you know what you were trying to do, and a red number
-   would answer that question for the reader before they had asked it. */
-td.delta { color: var(--ink); font-weight: 500; white-space: nowrap; }
-td.delta.none { color: var(--muted); font-weight: 400; }
-td.prior { color: var(--ink-2); }
-td small.per100 { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.period-bar .chip-count { opacity: .6; }
-.period-bar { margin: 0 0 18px; }
-.period-bar .chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
-.period-note { font-size: 12.5px; color: var(--muted); margin: -10px 0 18px; }
-details { margin-top: 10px; }
-summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
-.empty { color: var(--muted); font-style: italic; padding: 20px 0; }
-.banner {
-  border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent);
-  padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 13.5px; margin: 14px 0;
-}
-footer { margin-top: 46px; color: var(--muted); font-size: 12.5px; }
-.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 20px; }
-.status { font-size: 13px; color: var(--ink-2); }
-.status.busy::after {
-  content: ''; display: inline-block; width: 9px; height: 9px; margin-left: 7px;
-  border: 2px solid var(--muted); border-top-color: transparent; border-radius: 50%;
-  vertical-align: -1px; animation: spin .7s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.hands th.sortable-col { cursor: pointer; user-select: none; white-space: nowrap; }
-.hands th.sortable-col:hover { color: var(--ink-2); }
-.hands th.sortable-col::after { content: ' \\2195'; opacity: .25; }
-.hands th.sortable-col[aria-sort="ascending"]::after { content: ' \\25B2'; opacity: .9; }
-.hands th.sortable-col[aria-sort="descending"]::after { content: ' \\25BC'; opacity: .9; }
-.hands td.cards, .hands td.board { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; letter-spacing: .02em; }
-.hands td.board { color: var(--ink-2); }
-.hands td.money.pos { color: var(--pos); } .hands td.money.neg { color: var(--neg); }
-.hands td.when { white-space: nowrap; }
-.hands td.when small { display: block; color: var(--muted); font-size: 11.5px; }
-.hands td.opp { color: var(--ink-2); font-size: 12.5px; }
-.hands td.made { white-space: nowrap; }
-/* The one bucket the section exists to make unmissable. Weight, not hue: it is
-   already in a column of words and a red one would read as a loss rather than
-   as a category. */
-.hands td.made.nopair { font-weight: 600; }
-td.num.muted { color: var(--ink-2); }
-/* The preflop cell is dimmed or spotlit by its own size, never by position:
-   one open is background, a 3-bet pot is the finding. See PREFLOP_*_BB. */
-td.context { color: var(--ink-2); }
-td.chosen {
-  font-weight: 600;
-  background: color-mix(in srgb, var(--warn) 12%, transparent);
-}
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.num.pos { color: var(--pos); } td.num.neg { color: var(--neg); }
-tr.spotlight td { background: color-mix(in srgb, var(--warn) 8%, transparent); }
-.hand-btn {
-  font: inherit; font-size: 12.5px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
-  background: transparent; color: var(--ink-2); border: 1px solid var(--border);
-  font-variant-numeric: tabular-nums;
-}
-.hand-btn:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
-.hand-btn[aria-expanded="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-.raw-panel { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
-.raw-panel .raw-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 12.5px; color: var(--muted); }
-.raw-panel pre {
-  margin: 0; padding: 12px 14px; border-radius: 8px; overflow-x: auto;
-  background: color-mix(in srgb, var(--ink) 5%, transparent);
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12px; line-height: 1.45; white-space: pre;
-}
-.tag { display:inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; white-space: nowrap;
-  background: color-mix(in srgb, var(--muted) 14%, transparent); color: var(--ink-2); }
-.tag.win { background: color-mix(in srgb, var(--pos) 16%, transparent); color: var(--pos); }
-.tag.loss { background: color-mix(in srgb, var(--neg) 16%, transparent); color: var(--neg); }
-/* Stats | Solver. The selected tab is marked by weight and an underline, not
-   by colour. */
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 14px 0 20px; }
-.tab {
-  font: inherit; font-size: 14px; padding: 8px 16px; cursor: pointer; background: transparent;
-  color: var(--ink-2); border: none; border-bottom: 2px solid transparent; margin-bottom: -1px;
-}
-.tab:hover { color: var(--ink); }
-.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
-/* Analysing a hand needs the server, so the button exists only on its page. */
-.analyse-btn { display: none; margin-left: 6px; }
-body.live .analyse-btn { display: inline-block; }
-.sv-cols { display: flex; flex-wrap: wrap; gap: 28px; }
-.sv-col { flex: 1 1 380px; min-width: 0; }
-.sv-col h3 { margin-top: 0; }
-.sv-slots { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.sv-slots .sv-gap { width: 10px; }
-.sv-slots small { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
-.sv-slot {
-  width: 44px; height: 56px; font: 600 17px/1 system-ui, sans-serif; border-radius: 7px; cursor: pointer;
-  border: 1px dashed var(--axis); background: transparent; color: var(--ink);
-}
-.sv-slot.filled { border-style: solid; background: var(--page); }
-.sv-slot[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 1px; }
-.sv-deck { display: grid; grid-template-columns: repeat(13, 1fr); gap: 3px; max-width: 470px; }
-.sv-card {
-  font: inherit; font-size: 12.5px; padding: 5px 0; border-radius: 5px; cursor: pointer;
-  border: 1px solid var(--border); background: var(--page); color: var(--ink);
-}
-.sv-card:hover:not(:disabled) { border-color: var(--ink); }
-.sv-card:disabled { opacity: .25; cursor: default; }
-/* The suit symbol carries the suit; the colour is the usual redundancy. */
-.sv-card[data-suit="h"], .sv-card[data-suit="d"],
-.sv-slot[data-suit="h"], .sv-slot[data-suit="d"] { color: var(--bad); }
-.sv-grid { display: grid; grid-template-columns: repeat(13, 1fr); gap: 2px; max-width: 470px; user-select: none; }
-.sv-cell {
-  font: inherit; font-size: 10.5px; padding: 0; aspect-ratio: 1; border-radius: 3px; cursor: pointer;
-  border: 1px solid var(--border); background: var(--page); color: var(--ink-2);
-}
-.sv-cell.pair { border-color: var(--axis); }
-.sv-cell[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-.sv-field { display: inline-flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); margin: 12px 12px 0 0; }
-.sv-field input {
-  font: inherit; font-size: 14px; padding: 5px 8px; width: 130px; border-radius: 6px;
-  border: 1px solid var(--axis); background: var(--page); color: var(--ink);
-}
-.sv-field.wide { display: flex; margin-right: 0; }
-.sv-field.wide input { width: 100%; max-width: 470px; }
-.sv-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
-.sv-go {
-  font: inherit; font-size: 14px; font-weight: 600; padding: 7px 18px; border-radius: 8px; cursor: pointer;
-  border: 1px solid var(--ink); background: var(--ink); color: var(--surface);
-}
-.status.err { color: var(--bad); }
-#sv-out .tiles { margin: 20px 0 8px; }
-#sv-out td.none { color: var(--muted); }
-@media (max-width: 640px) { body { padding: 18px 12px 60px; } .tile .v { font-size: 23px; } }
-"""
-
-JS = """
-(function () {
-  const $ = (s, r) => (r || document).querySelector(s);
-  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
-
-  // The selected period, and everything that needs telling when it changes.
-  // Sections that re-render server-side are swapped wholesale; the charts and
-  // the heatmap instead redraw from data they already hold, because they show
-  // the selected period in the context of the whole history rather than alone.
-  let PERIOD = 'all';
-  // Keys shared with LIVE_JS, which runs in its own scope in the same script.
-  const PKEY = 'pt-period', SKEY = 'pt-jumpy-starts', RELOADED = 'pt-reloaded';
-  // The period keys whose boundary jumps rather than slides; see the restore.
-  const JUMPY = ['session', 'today'];
-  let BANDS = {};
-  let RAWS = {};
-  const listeners = [];
-
-  // ---- Stats | Solver
-  // Announced on the document because two other scripts care which tab is
-  // showing: the live poll holds its reload while a scenario is being built,
-  // and the Solver switches here itself when a hand is sent to it.
-  $$('.tab[data-tab]').forEach(function (b) {
-    b.addEventListener('click', function () {
-      $$('.tab[data-tab]').forEach(function (o) {
-        o.setAttribute('aria-selected', String(o === b));
-        const pane = document.getElementById('tab-' + o.dataset.tab);
-        if (pane) pane.hidden = o !== b;
-      });
-      document.dispatchEvent(new CustomEvent('pt-tab', { detail: b.dataset.tab }));
-    });
-  });
-
-  function isDark() {
-    const t = document.documentElement.getAttribute('data-theme');
-    if (t) return t === 'dark';
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
-  }
-  const SEQ_LIGHT = ['#cde2fb','#b7d3f6','#9ec5f4','#86b6ef','#6da7ec','#5598e7',
-                     '#3987e5','#2a78d6','#256abf','#1c5cab','#184f95','#104281','#0d366b'];
-  // Below this share played, a starting-hand cell is painted blank on both
-  // metrics. bb/100 is over every deal, so a hand that is always folded shows
-  // only the blinds lost folding it -- noise in red, not a result.
-  const RARELY_PLAYED = 2;
-  // The bb/100 colour scale ends at this share of the played cells.
-  const SCALE_PCTILE = 0.9;
-  // Blank is white on a light page and the surface on a dark one, where the
-  // ramp runs the other way and white would be the loudest cell on it.
-  function blankColor() { return isDark() ? '#1a1a19' : '#ffffff'; }
-  function hex2rgb(h){return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
-  function rgb2hex(c){return '#'+c.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');}
-  function lerp(a,b,t){return a.map((v,i)=>v+(b[i]-v)*t);}
-  function lum(h){const c=hex2rgb(h).map(v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);});
-    return 0.2126*c[0]+0.7152*c[1]+0.0722*c[2];}
-
-  // Sequential: one hue, light->dark on light surfaces and dark->light on dark.
-  function seqColor(t) {
-    const ramp = isDark() ? SEQ_LIGHT.slice().reverse() : SEQ_LIGHT;
-    const i = Math.max(0, Math.min(ramp.length - 1, Math.round(t * (ramp.length - 1))));
-    return ramp[i];
-  }
-  // Diverging: two poles either side of a neutral grey midpoint.
-  function divColor(t) {
-    const mid = hex2rgb(isDark() ? '#383835' : '#f0efec');
-    const pos = hex2rgb(isDark() ? '#3987e5' : '#2a78d6');
-    const neg = hex2rgb(isDark() ? '#e66767' : '#e34948');
-    return t >= 0 ? rgb2hex(lerp(mid, pos, Math.min(1, t)))
-                  : rgb2hex(lerp(mid, neg, Math.min(1, -t)));
-  }
-
-  function place(tip, wrap, ev) {
-    const r = wrap.getBoundingClientRect();
-    let x = ev.clientX - r.left + 14, y = ev.clientY - r.top + 14;
-    if (x + tip.offsetWidth > r.width) x = ev.clientX - r.left - tip.offsetWidth - 14;
-    if (y + tip.offsetHeight > r.height) y = ev.clientY - r.top - tip.offsetHeight - 14;
-    tip.style.left = Math.max(0, x) + 'px';
-    tip.style.top = Math.max(0, y) + 'px';
-  }
-
-  // ---- cumulative winnings: crosshair + shared tooltip
-  $$('[data-chart="winnings"]').forEach(function (wrap) {
-    const d = JSON.parse(wrap.dataset.payload);
-    const svg = $('svg', wrap), tip = $('.tooltip', wrap);
-    const hair = $('.crosshair', wrap), target = $('.hover-target', wrap);
-    const m = d.series[0].values.length;
-    if (!m) return;
-    function toUser(ev) {
-      const pt = svg.createSVGPoint();
-      pt.x = ev.clientX; pt.y = ev.clientY;
-      return pt.matrixTransform(svg.getScreenCTM().inverse());
-    }
-    // Hand h is drawn at h on an axis padded past the last hand, so the
-    // mouse maps through the domain, not across the full plot width.
-    const span = Math.max(1, d.x1 - d.x0), width = d.right - d.left;
-    target.addEventListener('mousemove', function (ev) {
-      const u = toUser(ev);
-      const hand = d.x0 + ((u.x - d.left) / width) * span;
-      // values[j] is hand j * step + 1, the last one clamped to hand n.
-      const j = Math.max(0, Math.min(m - 1, Math.round((hand - 1) / d.step)));
-      const i = Math.min(j * d.step, d.n - 1);
-      const x = d.left + ((i + 1 - d.x0) / span) * width;
-      hair.setAttribute('x1', x); hair.setAttribute('x2', x);
-      hair.style.display = '';
-      tip.hidden = false;
-      tip.innerHTML = '<b>Hand ' + (i + 1) + '</b><br>' + d.series.map(function (s) {
-        return '<span class="sw" style="background:var(--' + s.key + ')"></span>' +
-               s.name + ' <b>' + s.values[j].toFixed(1) + ' bb</b>';
-      }).join('<br>');
-      place(tip, wrap, ev);
-    });
-    target.addEventListener('mouseleave', function () {
-      hair.style.display = 'none'; tip.hidden = true;
-    });
-
-    const band = $('.period-band', wrap);
-    listeners.push(function () {
-      const b = BANDS[PERIOD];
-      if (!band) return;
-      if (!b) { band.setAttribute('width', 0); return; }
-      const at = i => d.left + ((i - d.x0) / Math.max(1, d.x1 - d.x0)) * (d.right - d.left);
-      const x0 = at(b[0]), x1 = at(b[1]);
-      band.setAttribute('x', x0.toFixed(1));
-      band.setAttribute('width', Math.max(1.5, x1 - x0).toFixed(1));
-    });
-  });
-
-  // ---- rolling discipline: the same band, on a hand-number axis
-  $$('[data-chart="rolling"]').forEach(function (wrap) {
-    const d = JSON.parse(wrap.dataset.payload);
-    const band = $('.period-band', wrap);
-    if (!band) return;
-    listeners.push(function () {
-      const b = BANDS[PERIOD];
-      if (!b) { band.setAttribute('width', 0); return; }
-      const at = v => d.left + ((v - d.x0) / Math.max(1, d.x1 - d.x0)) * (d.right - d.left);
-      const x0 = Math.max(d.left, Math.min(d.right, at(b[0])));
-      const x1 = Math.max(d.left, Math.min(d.right, at(b[1])));
-      band.setAttribute('x', x0.toFixed(1));
-      band.setAttribute('width', Math.max(0, x1 - x0).toFixed(1));
-    });
-  });
-
-  // ---- range heatmap: position filter, metric switch, selected-vs-prior
-  $$('.heatmap').forEach(function (wrap) {
-    const data = JSON.parse(wrap.dataset.payload);
-    const tip = $('.tooltip', wrap), legend = $('.scale-legend', wrap);
-    const priPanel = $('.panel[data-side="pri"]', wrap);
-    const selHead = $('.panel[data-side="sel"] .panel-head', wrap);
-    let pos = 'All', metric = 'freq';
-
-    // Cells arrive as [n, vpip, bb100] in grid order, indexed by data-i; the
-    // field names and combo keys cost more than the numbers, and every period
-    // carries a grid for both panels.
-    function cellOf(side, i) {
-      const p = data[PERIOD] || data.all || {};
-      const g = (p[side] || {})[pos] || [];
-      const v = g[i];
-      if (!v || !v[0]) return null;
-      return { n: v[0], vpip: v[1], freq: 100 * v[1] / v[0], bb100: v[2] };
-    }
-
-    function paint() {
-      const p = data[PERIOD] || data.all || {};
-      const two = PERIOD !== 'all' && !!p.pri;
-      priPanel.hidden = !two;
-      selHead.textContent = two ? 'Selected period' : 'All hands';
-      const sides = two ? ['sel', 'pri'] : ['sel'];
-
-      // One scale across both panels. Two grids scaled independently would
-      // show a difference in colour that is not a difference in the data.
-      // The ends sit at the SCALE_PCTILE of |bb/100|, not the maximum: AA alone
-      // runs to four figures, and scaling to it washed every other cell into
-      // the grey midpoint. Cells past the end saturate, and the legend says so.
-      const mags = [];
-      sides.forEach(function (side) {
-        ((p[side] || {})[pos] || []).forEach(function (c) {
-          if (!c || !c[0] || 100 * c[1] / c[0] < RARELY_PLAYED) return;
-          if (c[2] !== null && c[2] !== undefined) mags.push(Math.abs(c[2]));
-        });
-      });
-      mags.sort((a, b) => a - b);
-      const maxAbs = Math.max(1, mags.length
-        ? mags[Math.min(mags.length - 1, Math.floor(SCALE_PCTILE * mags.length))] : 1);
-
-      $$('.cellg', wrap).forEach(function (cell) {
-        const d = cellOf(cell.dataset.side, +cell.dataset.i);
-        const rect = $('rect', cell), label = $('text', cell);
-        const value = d ? d[metric] : null;
-        // Inline style, not the fill attribute: a presentation attribute loses
-        // to any stylesheet rule, and .cell / .cell-label both set a fill, so
-        // setAttribute('fill') left every cell the colour of the surface.
-        if (value === null || value === undefined) {
-          rect.style.fill = 'none';
-          rect.style.strokeDasharray = '2 2';
-          label.style.fill = 'var(--muted)';
-          label.style.opacity = '0.5';
-          return;
-        }
-        rect.style.strokeDasharray = '';
-        label.style.opacity = '';
-        // A combo played under RARELY_PLAYED % of the time is blank, not the
-        // palest blue: most of the grid is folded hands, and tinting them all
-        // buries the range that was actually played. Never-dealt cells keep
-        // their dashed outline, so blank still means "dealt and folded".
-        const fill = d.freq < RARELY_PLAYED ? blankColor()
-          : metric === 'freq' ? seqColor(0.12 + 0.88 * (d.freq / 100))
-          : divColor(d.bb100 / maxAbs);
-        rect.style.fill = fill;
-        label.style.fill = lum(fill) > 0.42 ? '#0b0b0b' : '#ffffff';
-      });
-
-      const steps = [];
-      for (let i = 0; i <= 8; i++) {
-        const t = i / 8;
-        steps.push('<i style="background:' +
-          (metric === 'freq' ? seqColor(t) : divColor(t * 2 - 1)) + '"></i>');
-      }
-      const blank = '<span class="ramp"><i style="background:' + blankColor() +
-        ';outline:1px solid var(--border);outline-offset:-1px"></i></span><span>played under ' +
-        RARELY_PLAYED + '%</span>';
-      legend.innerHTML = (metric === 'freq'
-        ? blank + '<span class="ramp">' + steps.join('') + '</span><span>100% played</span>'
-        : blank + '<span>&le; -' + maxAbs.toFixed(0) + '</span><span class="ramp">' +
-          steps.join('') + '</span><span>&ge; +' + maxAbs.toFixed(0) + ' bb/100</span>');
-      $$('.chip[data-pos]', wrap).forEach(b =>
-        b.setAttribute('aria-pressed', String(b.dataset.pos === pos)));
-      $$('.chip.metric', wrap).forEach(b =>
-        b.setAttribute('aria-pressed', String(b.dataset.metric === metric)));
-    }
-
-    $$('.chip[data-pos]', wrap).forEach(b =>
-      b.addEventListener('click', () => { pos = b.dataset.pos; paint(); }));
-    $$('.chip.metric', wrap).forEach(b =>
-      b.addEventListener('click', () => { metric = b.dataset.metric; paint(); }));
-
-    $$('.cellg', wrap).forEach(function (cell) {
-      cell.addEventListener('mousemove', function (ev) {
-        const d = cellOf(cell.dataset.side, +cell.dataset.i);
-        const which = cell.dataset.side === 'pri' ? 'prior' : 'selected';
-        tip.hidden = false;
-        tip.innerHTML = '<b>' + cell.dataset.combo + '</b> &middot; ' + pos +
-          (PERIOD === 'all' ? '' : ' &middot; ' + which) + '<br>' +
-          (d ? ('dealt ' + d.n + ' time' + (d.n === 1 ? '' : 's') + '<br>played ' +
-            d.freq.toFixed(0) + '%' +
-            (d.bb100 === null ? '' : '<br>' + d.bb100.toFixed(0) + ' bb/100'))
-             : 'never dealt');
-        place(tip, wrap, ev);
-      });
-      cell.addEventListener('mouseleave', () => { tip.hidden = true; });
-    });
-    listeners.push(paint);
-    paint();
-  });
+# The page's stylesheet and scripts live as real .css/.js files beside this
+# module, so they get an editor and a readable diff, and are inlined at build
+# time: the report is still one self-contained file.
+_STATIC = Path(__file__).resolve().parent / "static"
 
 
-  // ---- biggest pots: table switch, column sort, raw-text panel
-  // Bound through a function rather than inline, because the period filter
-  // replaces this section's markup wholesale and the handlers go with it.
-  function initDrilldown(root) {
-    $$('[data-drilldown]', root).forEach(function (wrap) {
-      const panel = $('.raw-panel', wrap);
-      const pre = $('pre', panel), head = $('.raw-head span', panel);
-
-      $$('.chip[data-tbl]', wrap).forEach(function (b) {
-        b.addEventListener('click', function () {
-          $$('.chip[data-tbl]', wrap).forEach(o =>
-            o.setAttribute('aria-pressed', String(o === b)));
-          $$('table.hands', wrap).forEach(t => { t.hidden = t.dataset.tbl !== b.dataset.tbl; });
-          // The open hand belongs to the table being switched away from.
-          $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
-          panel.hidden = true;
-        });
-      });
-
-      // Sort on any column. Numeric columns carry data-v so "-12.4" and a blank
-      // cell order correctly regardless of how they are formatted for display.
-      $$('table.hands', wrap).forEach(function (table) {
-        const body = $('tbody', table);
-        $$('th.sortable-col', table).forEach(function (th, idx) {
-          th.addEventListener('click', function () {
-            const num = th.dataset.type === 'num';
-            const desc = th.getAttribute('aria-sort') !== 'descending';
-            const rows = $$('tr', body);
-            rows.sort(function (a, b) {
-              const ca = a.children[idx], cb = b.children[idx];
-              let x, y;
-              if (num) {
-                x = parseFloat(ca.dataset.v); y = parseFloat(cb.dataset.v);
-                if (isNaN(x)) x = -Infinity;
-                if (isNaN(y)) y = -Infinity;
-              } else {
-                x = (ca.dataset.v || ca.textContent).trim().toLowerCase();
-                y = (cb.dataset.v || cb.textContent).trim().toLowerCase();
-              }
-              if (x < y) return desc ? 1 : -1;
-              if (x > y) return desc ? -1 : 1;
-              return 0;
-            });
-            rows.forEach(r => body.appendChild(r));
-            $$('th.sortable-col', table).forEach(o => o.removeAttribute('aria-sort'));
-            th.setAttribute('aria-sort', desc ? 'descending' : 'ascending');
-          });
-        });
-      });
-
-      $$('.hand-btn', wrap).forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          const open = btn.getAttribute('aria-expanded') === 'true';
-          $$('.hand-btn', wrap).forEach(o => o.setAttribute('aria-expanded', 'false'));
-          if (open) { panel.hidden = true; return; }
-          btn.setAttribute('aria-expanded', 'true');
-          // One pool of hand text for every period: the biggest-pot lists
-          // overlap heavily, and re-reading the same hand per period would
-          // inline it five times over.
-          const txt = RAWS[btn.dataset.hand];
-          head.textContent = txt ? ('Hand #' + btn.dataset.no)
-            : ('Hand #' + btn.dataset.no + ' — source file no longer readable');
-          pre.textContent = txt || '';
-          panel.hidden = false;
-          panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        });
-      });
-    });
-  }
-  initDrilldown(document);
+def _asset(name: str) -> str:
+    return (_STATIC / name).read_text(encoding="utf-8")
 
 
-  // ---- period filter
-  const periodData = document.getElementById('period-data');
-  if (periodData) {
-    const D = JSON.parse(periodData.textContent);
-    // "All" is the markup the page opened with, so it is read back from the
-    // page rather than shipped a second time. Nothing has been swapped yet.
-    D.regions.all = {};
-    D.ids.forEach(function (id) {
-      const el = document.getElementById(id);
-      if (el) D.regions.all[id] = el.innerHTML;
-    });
-    RAWS = D.raws || {};
-    D.periods.forEach(function (p) { if (p.band) BANDS[p.key] = p.band; });
-
-    function applyPeriod(key) {
-      PERIOD = key;
-      // Remembered only so an auto-reload can put it back; see the restore
-      // below for why that is not the same thing as defaulting to it.
-      try { sessionStorage.setItem(PKEY, key); } catch (e) {}
-      const regions = D.regions[key] || {};
-      Object.keys(regions).forEach(function (id) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.innerHTML = regions[id];
-        initDrilldown(el);
-      });
-      $$('.period-bar .chip').forEach(b =>
-        b.setAttribute('aria-pressed', String(b.dataset.period === key)));
-      listeners.forEach(function (fn) { fn(); });
-    }
-
-    $$('.period-bar .chip').forEach(function (b) {
-      b.addEventListener('click', function () { applyPeriod(b.dataset.period); });
-    });
-
-    // Restored across the live page's own reload, and across nothing else.
-    // Opening report.html, or reloading it by hand, still lands on "All": the
-    // pull with a period filter is to open the report after every session and
-    // read today's win rate, which is a number with a +/-150 bb/100 interval
-    // on it. Carrying an explicit click through a reload the reader did not
-    // ask for is the opposite of that -- the filter was chosen, and new hands
-    // arriving is not a reason to throw the choice away.
-    //
-    // The reload flag is what separates the two, and LIVE_JS sets it only on
-    // the path that calls location.reload().
-    let want = null;
-    try {
-      if (sessionStorage.getItem(RELOADED) !== null) want = sessionStorage.getItem(PKEY);
-      sessionStorage.removeItem(RELOADED);
-    } catch (e) {}
-
-    // An option can vanish between renders: periods() drops the ones that are
-    // empty, that cover the whole history, or that start where an option
-    // already offered starts, so "Last session" appears and disappears as the
-    // history grows. A key with no fragments behind it would swap in nothing.
-    if (want && !D.regions[want]) want = null;
-
-    // Two keys can survive a reload and mean something else. Most of them
-    // slide -- "last 7 days" is still the last 7 days after two more hands --
-    // but a 30-minute gap makes "Last session" a different session, and
-    // midnight does the same to "Today" in the middle of a session that is
-    // still going. Either would quietly swap the 400 hands being read for the
-    // 3 just dealt, with the same button lit.
-    //
-    // The band's start index is where the window begins in the hand sequence,
-    // so it is the discriminator: new hands extend the end, and the start
-    // moves only when the boundary itself jumped. The sliding keys get no such
-    // check, because their start drifts on every import by design and checking
-    // it would reject them always.
-    const starts = {};
-    JUMPY.forEach(function (k) { if (BANDS[k]) starts[k] = BANDS[k][0]; });
-    if (want && JUMPY.indexOf(want) !== -1) {
-      let was = {};
-      try { was = JSON.parse(sessionStorage.getItem(SKEY) || '{}'); } catch (e) {}
-      if (!(want in starts) || was[want] !== starts[want]) want = null;
-    }
-    try { sessionStorage.setItem(SKEY, JSON.stringify(starts)); } catch (e) {}
-
-    if (want && want !== 'all') {
-      applyPeriod(want);
-    } else {
-      // A rejected key is forgotten, not kept: having fallen back to "All",
-      // the next reload must not jump back to a filter the reader is no
-      // longer looking at.
-      try { sessionStorage.removeItem(PKEY); } catch (e) {}
-      listeners.forEach(function (fn) { fn(); });
-    }
-  }
-
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
-    listeners.forEach(function (fn) { fn(); });
-  });
-})();
-"""
-
-
-LIVE_JS = """
-(function () {
-  const status = document.getElementById('refresh-status');
-  if (!status) return;
-  const SCROLL = 'pt-scroll';
-  const RELOADED = 'pt-reloaded';
-  const EVERY = 60000;
-  // What this page was rendered from. Staleness is a fact about the page, not
-  // about whether our own refresh call happened to be the one that imported.
-  const RENDERED = parseInt(status.dataset.hands, 10);
-
-  // A reload would otherwise throw the reader back to the top of the page.
-  const saved = sessionStorage.getItem(SCROLL);
-  if (saved !== null) {
-    window.scrollTo(0, parseInt(saved, 10));
-    sessionStorage.removeItem(SCROLL);
-  }
-
-  // The page was rendered by the server on this request, so it is as fresh as
-  // a poll that just returned. Every later poll moves the stamp, whether or
-  // not it found anything, because "we looked and there was nothing" is the
-  // reassurance the line exists to give.
-  let stamp = new Date();
-  let busy = false;
-  let waiting = false;
-
-  function clock(d) {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
-  function idle(text) {
-    status.textContent = text;
-    status.classList.remove('busy');
-  }
-  function showStamp() {
-    if (busy || waiting) return;
-    const secs = Math.round((Date.now() - stamp.getTime()) / 1000);
-    const ago = secs < 90 ? secs + 's ago'
-              : Math.round(secs / 60) + 'm ago';
-    idle('Last refreshed ' + clock(stamp) + ' · ' + ago);
-  }
-
-  async function refresh() {
-    if (busy) return;
-    busy = true;
-    status.textContent = 'Checking for new hands';
-    status.classList.add('busy');
-    try {
-      const res = await fetch('/api/refresh', { method: 'POST' });
-      const d = await res.json();
-      if (!d.ok) {
-        busy = false;
-        idle('Refresh failed at ' + clock(new Date()) + ': ' + (d.error || 'unknown error'));
-        return;
-      }
-      stamp = new Date();
-      // d.new_hands is what this call imported; the total is what the server
-      // holds. Only the second one can say whether the page is behind.
-      const behind = Number.isNaN(RENDERED) ? d.new_hands
-                                            : d.total_hands - RENDERED;
-      if (!behind) {
-        busy = false;
-        showStamp();
-        return;
-      }
-      const what = behind > 0 ? '+' + behind + ' hands' : 'history changed';
-      // A reload rebuilds the page, and a half-built scenario on the Solver
-      // tab is not something the server can give back. New hands arriving is
-      // no reason to throw it away, so the reload waits for the reader to go
-      // back to Stats -- which is the tab the new hands are for anyway.
-      const solver = document.getElementById('tab-solver');
-      if (solver && !solver.hidden) {
-        busy = false;
-        idle(what + ' — will reload when you go back to Stats');
-        if (!waiting) {
-          waiting = true;
-          document.addEventListener('pt-tab', function (ev) {
-            if (ev.detail === 'stats') { waiting = false; refresh(); }
-          }, { once: true });
-        }
-        return;
-      }
-      status.textContent = what + ', reloading';
-      // Both are read once on the way back and cleared, so only the reload
-      // this line is about restores anything.
-      sessionStorage.setItem(SCROLL, String(window.scrollY));
-      sessionStorage.setItem(RELOADED, '1');
-      location.reload();
-    } catch (e) {
-      busy = false;
-      idle('Refresh failed at ' + clock(new Date()) + ': ' + e.message);
-    }
-  }
-
-  showStamp();
-  setInterval(showStamp, 5000);
-  setInterval(refresh, EVERY);
-})();
-"""
-
+CSS = _asset("report.css")
+JS = _asset("report.js")
+# The refresh toolbar's poll; see serve.py. Live page only, like SOLVER_JS.
+LIVE_JS = _asset("live.js")
 
 # The Solver tab. Only the live page carries this: every number on the tab is
 # computed by the server, so on a file:// page there is nothing for it to call.
 # It holds no poker logic at all -- not the range syntax, not card removal, not
 # a pot-odds formula. It collects a scenario, posts it, and paints the answer,
 # so there is one definition of each of those and it is the tested one.
-SOLVER_JS = """
-(function () {
-  const root = document.getElementById('solver');
-  const dataEl = document.getElementById('solver-data');
-  if (!root || !dataEl) return;
-  const D = JSON.parse(dataEl.textContent);
-  const $ = (s, r) => (r || root).querySelector(s);
-  const $$ = (s, r) => Array.from((r || root).querySelectorAll(s));
-  const SUIT = { s: '♠', h: '♥', d: '♦', c: '♣' };
-  const SLOTS = ['h0', 'h1', 'b0', 'b1', 'b2', 'b3', 'b4'];
-  const state = { cards: {}, active: 'h0', cells: new Set(),
-                  mode: 'facing_bet', continues: null };
-  const out = $('#sv-out'), status = $('#sv-status'), note = $('#sv-hand');
-  const rangeBox = $('#sv-range'), count = $('#sv-count');
-
-  function esc(s) {
-    return String(s).replace(/[&<>"]/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  }
-  function face(card) { return card[0] + SUIT[card[1]]; }
-  function pct(x, d) { return (x * 100).toFixed(d === undefined ? 1 : d) + '%'; }
-  function bb(x) { return (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2) + ' bb'; }
-  function say(text, bad) {
-    status.textContent = text;
-    status.classList.remove('busy');
-    status.classList.toggle('err', !!bad);
-  }
-
-  async function api(path, body) {
-    const res = await fetch(path, body === undefined ? {} : {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body) });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
-    return d;
-  }
-
-  // ---- cards
-  function paintCards() {
-    const used = new Set(Object.values(state.cards));
-    $$('.sv-slot').forEach(function (b) {
-      const c = state.cards[b.dataset.slot];
-      b.textContent = c ? face(c) : '';
-      b.dataset.suit = c ? c[1] : '';
-      b.classList.toggle('filled', !!c);
-      b.setAttribute('aria-pressed', String(b.dataset.slot === state.active));
-    });
-    $$('.sv-card').forEach(function (b) { b.disabled = used.has(b.dataset.card); });
-  }
-  function firstEmpty() { return SLOTS.find(k => !state.cards[k]) || null; }
-  $$('.sv-slot').forEach(function (b) {
-    b.addEventListener('click', function () {
-      delete state.cards[b.dataset.slot];
-      state.active = b.dataset.slot;
-      paintCards();
-    });
-  });
-  $$('.sv-card').forEach(function (b) {
-    b.addEventListener('click', function () {
-      const slot = state.active && !state.cards[state.active] ? state.active : firstEmpty();
-      if (!slot) return;
-      state.cards[slot] = b.dataset.card;
-      state.active = firstEmpty();
-      paintCards();
-    });
-  });
-
-  // ---- range: the grid, the text and the presets are three views of one set
-  function paintGrid() {
-    $$('.sv-cell').forEach(function (b) {
-      b.setAttribute('aria-pressed', String(state.cells.has(b.dataset.cell)));
-    });
-  }
-  let rangeSeq = 0;
-  async function syncRange(text) {
-    const mine = ++rangeSeq;
-    try {
-      const d = await api('/api/range', { range: text });
-      if (mine !== rangeSeq) return false;
-      state.cells = new Set(d.cells);
-      rangeBox.value = d.range;
-      count.textContent = d.combos + ' holdings · ' + pct(d.combos / 1326) + ' of hands';
-      paintGrid();
-      $$('.chip[data-preset]').forEach(o => o.setAttribute('aria-pressed', 'false'));
-      say('');
-      return true;
-    } catch (e) { say(e.message, true); return false; }
-  }
-  let painting = null, timer = null;
-  function touch(b) {
-    if (painting) state.cells.add(b.dataset.cell); else state.cells.delete(b.dataset.cell);
-    b.setAttribute('aria-pressed', String(painting));
-    clearTimeout(timer);
-    timer = setTimeout(function () { syncRange(Array.from(state.cells).join(' ')); }, 250);
-  }
-  $$('.sv-cell').forEach(function (b) {
-    // Press to toggle one cell, drag to paint the rest the same way.
-    b.addEventListener('mousedown', function (ev) {
-      ev.preventDefault();
-      painting = !state.cells.has(b.dataset.cell);
-      touch(b);
-    });
-    b.addEventListener('mouseenter', function () { if (painting !== null) touch(b); });
-    b.addEventListener('keydown', function (ev) {
-      if (ev.key !== 'Enter' && ev.key !== ' ') return;
-      ev.preventDefault();
-      painting = !state.cells.has(b.dataset.cell);
-      touch(b);
-      painting = null;
-    });
-  });
-  document.addEventListener('mouseup', function () { painting = null; });
-  rangeBox.addEventListener('change', function () { syncRange(rangeBox.value); });
-  rangeBox.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter') { ev.preventDefault(); syncRange(rangeBox.value).then(ok => ok && solve()); }
-  });
-  $$('.chip[data-preset]').forEach(function (b) {
-    b.addEventListener('click', async function () {
-      const p = D.presets.find(x => x.key === b.dataset.preset);
-      if (await syncRange(p.range)) b.setAttribute('aria-pressed', 'true');
-    });
-  });
-
-  // ---- the bet
-  function paintMode() {
-    $$('.chip[data-mode]').forEach(o =>
-      o.setAttribute('aria-pressed', String(o.dataset.mode === state.mode)));
-    const facing = state.mode === 'facing_bet';
-    $('#sv-pot-label').textContent = facing ? 'Pot, with their bet in it (bb)' : 'Pot (bb)';
-    $('#sv-bet-label').textContent = facing ? 'To call (bb)' : 'Your bet (bb)';
-  }
-  $$('.chip[data-mode]').forEach(function (b) {
-    b.addEventListener('click', function () { state.mode = b.dataset.mode; paintMode(); });
-  });
-
-  // ---- the answer
-  function spec() {
-    const s = {
-      hero: ['h0', 'h1'].map(k => state.cards[k]).filter(Boolean).join(' '),
-      board: ['b0', 'b1', 'b2', 'b3', 'b4'].map(k => state.cards[k]).filter(Boolean).join(' '),
-      range: Array.from(state.cells).join(' '),
-      pot: $('#sv-pot').value, bet: $('#sv-bet').value, mode: state.mode,
-    };
-    if (state.continues) s.continues = Array.from(state.continues);
-    return s;
-  }
-  let solveSeq = 0;
-  async function solve() {
-    const mine = ++solveSeq;
-    status.textContent = 'Calculating';
-    status.classList.remove('err');
-    status.classList.add('busy');
-    try {
-      const d = await api('/api/solve', spec());
-      if (mine !== solveSeq) return;
-      // Kept only once there are buckets to keep: a preflop answer has none,
-      // and remembering "nothing continues" from it would fold every hand on
-      // the next flop.
-      if (d.buckets.length) {
-        state.continues = new Set(d.buckets.filter(b => b.continues).map(b => b.bucket));
-      }
-      render(d);
-      say('');
-    } catch (e) {
-      if (mine === solveSeq) say(e.message, true);
-    }
-  }
-  $('#sv-go').addEventListener('click', solve);
-  ['#sv-pot', '#sv-bet'].forEach(function (id) {
-    $(id).addEventListener('keydown', function (ev) { if (ev.key === 'Enter') solve(); });
-  });
-
-  function tile(k, v, m) {
-    return '<div class="tile"><div class="k">' + esc(k) + '</div><div class="v">'
-      + esc(v) + '</div><div class="m">' + esc(m) + '</div></div>';
-  }
-  function render(d) {
-    const how = d.method === 'exact'
-      ? 'exact · ' + d.evaluated.toLocaleString() + ' runouts × holdings'
-      : 'estimated from ' + d.evaluated.toLocaleString() + ' sampled boards, ± '
-        + pct(1.96 * d.se) + ' — preflop against a range is too many boards to enumerate';
-    let html = '<div class="tiles">'
-      + tile('Your equity', pct(d.equity), how)
-      + tile('You hold', d.hero_class || d.hero,
-             d.board ? d.hero + ' on ' + d.board : 'preflop')
-      + tile('Their range', d.combos.toLocaleString(),
-             'holdings once your cards and the board are removed');
-    if (d.facing) {
-      const f = d.facing;
-      html += tile('Calling ' + d.bet + ' bb to win ' + d.pot + ' bb', bb(f.ev_call),
-                   'needs ' + pct(f.required_equity) + ' · you have ' + pct(d.equity));
-    } else {
-      const b = d.betting;
-      const called = b.equity_when_called === null ? 'nothing calls'
-                   : pct(b.equity_when_called) + ' equity when called';
-      html += tile('Betting ' + d.bet + ' bb into ' + d.pot + ' bb', bb(b.ev_bet),
-                   (b.fold_derived
-                      ? 'they fold ' + pct(b.fold_freq) + ' (the unticked rows below)'
-                      : 'no fold frequency before the flop: priced as called by the whole range')
-                   + ' · ' + called)
-            + tile('Checking instead', bb(b.ev_check),
-                   'a bet with no equity needs ' + pct(b.breakeven_fold) + ' folds');
-    }
-    html += '</div>';
-
-    if (d.buckets.length) {
-      const pick = !!d.betting;
-      html += '<table><thead><tr><th>Their hand</th><th>Holdings</th>'
-            + '<th>Share of range</th><th>Your equity against it</th>'
-            + (pick ? '<th>Continues against a bet</th>' : '') + '</tr></thead><tbody>';
-      d.buckets.forEach(function (r) {
-        const none = r.combos === 0;
-        html += '<tr><td' + (none ? ' class="none"' : '') + '>' + esc(r.label) + '</td>'
-              + '<td' + (none ? ' class="none"' : '') + '>' + r.combos + '</td>'
-              + '<td' + (none ? ' class="none"' : '') + '>' + (none ? '—' : pct(r.share)) + '</td>'
-              + '<td' + (none ? ' class="none"' : '') + '>' + (none ? '—' : pct(r.equity)) + '</td>'
-              + (pick ? '<td><input type="checkbox" data-bucket="' + esc(r.bucket) + '"'
-                        + (r.continues ? ' checked' : '')
-                        + ' aria-label="' + esc(r.label) + ' continues"></td>' : '')
-              + '</tr>';
-      });
-      html += '</tbody></table>';
-    }
-    html += '<p class="note">' + esc(d.caveat) + '</p>';
-    out.innerHTML = html;
-    $$('input[data-bucket]', out).forEach(function (box) {
-      box.addEventListener('change', function () {
-        if (box.checked) state.continues.add(box.dataset.bucket);
-        else state.continues.delete(box.dataset.bucket);
-        solve();
-      });
-    });
-  }
-
-  // ---- a real hand, sent over from the Stats tab
-  async function loadHand(id, street) {
-    const tab = document.querySelector('.tab[data-tab="solver"]');
-    if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click();
-    say('Loading hand');
-    let d;
-    try {
-      d = await api('/api/hand?id=' + encodeURIComponent(id)
-                    + (street ? '&street=' + encodeURIComponent(street) : ''));
-    } catch (e) { say(e.message, true); return; }
-
-    state.cards = {};
-    d.hero.split(' ').filter(Boolean).forEach((c, i) => { state.cards['h' + i] = c; });
-    d.board.split(' ').filter(Boolean).forEach((c, i) => { state.cards['b' + i] = c; });
-    state.active = firstEmpty();
-    state.mode = d.mode;
-    state.continues = null;
-    $('#sv-pot').value = d.pot;
-    $('#sv-bet').value = d.bet;
-    paintCards();
-    paintMode();
-
-    const verb = { fold: 'folded', call: 'called', check: 'checked',
-                   bet: 'bet', raise: 'raised' }[d.did] || d.did;
-    let html = '<b>Hand #' + esc(d.site_hand_no) + '</b> · '
-      + d.streets.map(s => '<button type="button" class="chip" data-street="' + esc(s)
-          + '" aria-pressed="' + (s === d.street) + '">' + esc(s) + '</button>').join(' ')
-      + ' · you ' + esc(verb) + ' here'
-      + (d.hero_position ? ' from ' + esc(d.hero_position) : '') + '. ';
-    const opp = d.opponents.map(o => esc(o.player) + (o.position ? ' (' + esc(o.position) + ')' : '')
-      + (o.shown ? ', who showed ' + esc(o.shown) : ''));
-    if (d.opponents.length === 1) {
-      html += 'Against ' + opp[0] + '. ';
-      const p = D.presets.find(x => x.key === d.preset);
-      html += p ? 'Range suggested: <b>' + esc(p.label) + '</b>, because ' + esc(d.preset_why)
-                  + '. That is your own chart read onto an opponent — change it if they do not play like it.'
-                : 'Nothing in your chart describes what they did preflop, so the range is yours to pick.';
-    } else {
-      html += d.opponents.length + ' opponents still in: ' + opp.join('; ')
-            + '. Pick the range of the one you want to test against.';
-    }
-    note.innerHTML = html;
-    note.hidden = false;
-    $$('[data-street]', note).forEach(function (b) {
-      b.addEventListener('click', function () { loadHand(id, b.dataset.street); });
-    });
-
-    out.innerHTML = '';
-    if (d.range) {
-      if (await syncRange(d.range)) solve();
-    } else {
-      say('Pick a range, then Calculate');
-    }
-  }
-  // Delegated, because the period filter replaces the drill-down's markup
-  // wholesale and a handler bound to a button would go with it.
-  document.addEventListener('click', function (ev) {
-    const b = ev.target.closest && ev.target.closest('[data-analyse]');
-    if (b) loadHand(b.dataset.analyse, '');
-  });
-
-  $('#sv-clear').addEventListener('click', function () {
-    state.cards = {}; state.active = 'h0'; state.continues = null;
-    note.hidden = true; note.innerHTML = ''; out.innerHTML = '';
-    paintCards();
-    syncRange('');
-  });
-
-  paintCards();
-  paintMode();
-})();
-"""
+SOLVER_JS = _asset("solver.js")
 
 
 _PILLS = {
@@ -1609,42 +485,14 @@ def _rate_of(rows, name: str):
     return None if r is None or r["pct"] is None else r["pct"]
 
 
-def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: str):
-    """Every part of the page that a period filter changes.
-
-    Each fragment is rendered here, once per period, and swapped into place in
-    the browser. The report has to open from file:// with no server behind it,
-    so the alternative -- asking the pipeline to recompute on selection -- is
-    not available.
-    """
-    w = period.selected
-    prior_w = None if period.is_all else period.prior
+def _headline(conn, hero: str, period, m, pre, generated: str, stake_txt: str):
+    """The sub-line, the tiles and the banner above the first chart."""
     filtered = not period.is_all
-
-    m = stats.money_summary(conn, hero, w)
-    pre = stats.preflop_stats(conn, hero, w)
-    post = stats.postflop_stats(conn, hero, w)
-    ag = stats.aggression(conn, hero, w)
-    comp = stats.compliance(conn, hero, w)
-    pre_prior = stats.preflop_stats(conn, hero, prior_w) if filtered else None
-    post_prior = stats.postflop_stats(conn, hero, prior_w) if filtered else None
-    comp_prior = stats.compliance(conn, hero, prior_w) if filtered else None
-
-    pos_rows = stats.by_position(conn, hero, w)
-    funnel_rows = stats.street_funnel(conn, hero, w)
-    buckets = stats.pot_buckets(conn, hero, w)
-    stacks = stats.stack_histogram(conn, hero, 10, w)
-    tables = stats.by_table_count(conn, hero, w)
-    hours = stats.by_time(conn, hero, "%H", w)
-    days = stats.by_time(conn, hero, "%w", w)
-    n_sessions = len(stats.sessions(conn, hero, w))
-    drill_html, drill_ids = _drilldown(conn, hero, w, 15 if period.is_all else 10)
-    handclass_html = _handclass_card(conn, hero, w)
-
-    # ---- tiles. Win rate is deliberately absent from a filtered view: one
-    # session is 100-300 hands and its interval is wider than any result it
-    # could show, so a tile there would only invite the reader to try to read
-    # it. Hand count and the frequencies are what the window can support.
+    n_sessions = len(stats.sessions(conn, hero, period.selected))
+    # Win rate is deliberately absent from a filtered view: one session is
+    # 100-300 hands and its interval is wider than any result it could show, so
+    # a tile there would only invite the reader to try to read it. Hand count
+    # and the frequencies are what the window can support.
     if filtered:
         tiles = f"""
     <div class="tiles">
@@ -1714,7 +562,10 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
         sub = (f"{m['hands']:,} hands {esc(stake_txt)} &middot; "
                f"{esc(m['first_hand'][:16])} to {esc(m['last_hand'][:16])} &middot; "
                f"generated {esc(generated)}")
+    return sub, tiles, banner
 
+
+def _position_card(pos_rows) -> str:
     pos_table = "".join(
         "<tr><td>{}</td><td>{}</td><td>{}%</td><td>{}%</td><td>{}</td>"
         "<td>{:+.1f}</td><td class='ci'>&plusmn;{:.0f}</td></tr>".format(
@@ -1723,6 +574,19 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
             r["bb100"], r["ci95"])
         for r in pos_rows
     )
+    return (
+        f'<div class="card">{charts.position_bars(pos_rows)}'
+        f'<details><summary>Table view</summary>'
+        f'<table><thead><tr><th>Position</th><th>Hands</th><th>VPIP</th>'
+        f'<th>PFR</th><th>3-Bet</th><th>bb/100</th><th>95% CI</th></tr></thead>'
+        f'<tbody>{pos_table}</tbody></table></details></div>'
+    )
+
+
+def _load_card(conn, hero: str, w) -> str:
+    tables = stats.by_table_count(conn, hero, w)
+    hours = stats.by_time(conn, hero, "%H", w)
+    days = stats.by_time(conn, hero, "%w", w)
     table_rows = "".join(
         "<tr><td>{} table{}</td><td>{:,}</td><td>{}</td></tr>".format(
             r["tables"], "" if r["tables"] == 1 else "s", r["hands"],
@@ -1742,13 +606,65 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
             "-" if r["bb100"] is None else f"{r['bb100']:+.1f}")
         for r in hours
     )
+    return (
+        '<div class="card"><h3>Concurrent tables</h3>'
+        '<table><thead><tr><th>Load</th><th>Hands</th><th>bb/100</th></tr>'
+        f'</thead><tbody>{table_rows}</tbody></table>'
+        '<h3>By day of week</h3>'
+        '<table><thead><tr><th>Day</th><th>Hands</th><th>bb/100</th></tr>'
+        f'</thead><tbody>{day_rows}</tbody></table>'
+        '<h3>By hour of day</h3>'
+        '<table><thead><tr><th>Hour</th><th>Hands</th><th>bb/100</th></tr>'
+        f'</thead><tbody>{hour_rows}</tbody></table>'
+        f'<h3>Timeouts</h3><p class="note">{stats.timeouts(conn, hero, w)} '
+        'hand(s) where you timed out &mdash; a proxy for attention '
+        'overload.</p></div>'
+    )
+
+
+def _sample_card(hands: int) -> str:
     rel_rows = "".join(
         "<tr><td>{}</td><td>{:,}</td><td class='thin'>{:,}</td><td>{}</td></tr>".format(
             esc(r["stat"]), r["have"], r["needed"],
             '<span class="pill good">usable</span>' if r["ready"]
             else f'<span class="pill none">{r["pct"]:.0f}%</span>')
-        for r in stats.reliability(m["hands"])
+        for r in stats.reliability(hands)
     )
+    return (
+        '<div class="card"><table><thead><tr><th>Stat</th><th>Hands</th>'
+        f'<th>Needed</th><th></th></tr></thead><tbody>{rel_rows}'
+        '</tbody></table></div>'
+    )
+
+
+def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: str):
+    """Every part of the page that a period filter changes.
+
+    Each fragment is rendered here, once per period, and swapped into place in
+    the browser. The report has to open from file:// with no server behind it,
+    so the alternative -- asking the pipeline to recompute on selection -- is
+    not available.
+    """
+    w = period.selected
+    prior_w = None if period.is_all else period.prior
+    filtered = not period.is_all
+
+    m = stats.money_summary(conn, hero, w)
+    pre = stats.preflop_stats(conn, hero, w)
+    post = stats.postflop_stats(conn, hero, w)
+    ag = stats.aggression(conn, hero, w)
+    comp = stats.compliance(conn, hero, w)
+    pre_prior = stats.preflop_stats(conn, hero, prior_w) if filtered else None
+    post_prior = stats.postflop_stats(conn, hero, prior_w) if filtered else None
+    comp_prior = stats.compliance(conn, hero, prior_w) if filtered else None
+
+    pos_rows = stats.by_position(conn, hero, w)
+    funnel_rows = stats.street_funnel(conn, hero, w)
+    buckets = stats.pot_buckets(conn, hero, w)
+    stacks = stats.stack_histogram(conn, hero, 10, w)
+    drill_html, drill_ids = _drilldown(conn, hero, w, 15 if period.is_all else 10)
+    handclass_html = _handclass_card(conn, hero, w)
+    sub, tiles, banner = _headline(conn, hero, period, m, pre, generated, stake_txt)
 
     wwsf = next((r for r in post if r["name"] == "WWSF"), None)
     wtsd = next((r for r in post if r["name"] == "WTSD"), None)
@@ -1764,13 +680,7 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
         "r-sub": sub,
         "r-tiles": tiles,
         "r-banner": banner,
-        "r-position": (
-            f'<div class="card">{charts.position_bars(pos_rows)}'
-            f'<details><summary>Table view</summary>'
-            f'<table><thead><tr><th>Position</th><th>Hands</th><th>VPIP</th>'
-            f'<th>PFR</th><th>3-Bet</th><th>bb/100</th><th>95% CI</th></tr></thead>'
-            f'<tbody>{pos_table}</tbody></table></details></div>'
-        ),
+        "r-position": _position_card(pos_rows),
         "r-preflop": f'<div class="card">{_rate_table(pre, pre_prior)}</div>',
         "r-postflop": (
             f'<div class="card">{_rate_table(post, post_prior)}'
@@ -1790,25 +700,8 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
         "r-handclass": handclass_html,
         "r-drilldown": drill_html,
         "r-stacks": f'<div class="card">{charts.stack_histogram(stacks)}</div>',
-        "r-load": (
-            '<div class="card"><h3>Concurrent tables</h3>'
-            '<table><thead><tr><th>Load</th><th>Hands</th><th>bb/100</th></tr>'
-            f'</thead><tbody>{table_rows}</tbody></table>'
-            '<h3>By day of week</h3>'
-            '<table><thead><tr><th>Day</th><th>Hands</th><th>bb/100</th></tr>'
-            f'</thead><tbody>{day_rows}</tbody></table>'
-            '<h3>By hour of day</h3>'
-            '<table><thead><tr><th>Hour</th><th>Hands</th><th>bb/100</th></tr>'
-            f'</thead><tbody>{hour_rows}</tbody></table>'
-            f'<h3>Timeouts</h3><p class="note">{stats.timeouts(conn, hero, w)} '
-            'hand(s) where you timed out &mdash; a proxy for attention '
-            'overload.</p></div>'
-        ),
-        "r-sample": (
-            '<div class="card"><table><thead><tr><th>Stat</th><th>Hands</th>'
-            f'<th>Needed</th><th></th></tr></thead><tbody>{rel_rows}'
-            '</tbody></table></div>'
-        ),
+        "r-load": _load_card(conn, hero, w),
+        "r-sample": _sample_card(m["hands"]),
     }
     return regions, grids, drill_ids
 
@@ -1905,19 +798,82 @@ def _json_script(payload: dict, element_id: str) -> str:
     return f'<script type="application/json" id="{element_id}">{text}</script>'
 
 
+def _tourney_note(tourn) -> str:
+    if not tourn["hands"]:
+        return ""
+    return (
+        f" Cash games only: {tourn['hands']:,} tournament "
+        f"{'hand' if tourn['hands'] == 1 else 'hands'} across "
+        f"{tourn['events']:,} "
+        f"{'event' if tourn['events'] == 1 else 'events'} are imported but "
+        "excluded from every figure above.")
+
+
+def _period_bar(meta) -> str:
+    chips = "".join(
+        f'<button type="button" class="chip" data-period="{esc(p["key"])}" '
+        f'aria-pressed="{"true" if p["key"] == "all" else "false"}">'
+        f'{esc(p["label"])}'
+        + ("" if p["key"] == "all" else
+           f' <span class="chip-count">({p["hands"]:,})</span>')
+        + '</button>'
+        for p in meta
+    )
+    return (
+        '<div class="chip-row period-bar" role="group" '
+        'aria-label="Filter by period">'
+        '<span class="chip-label">Period</span>' + chips + '</div>'
+        '<p class="period-note">Filters the tables, the frequencies and the '
+        'compliance checks, and adds a comparison against everything before '
+        'the selected window. The cumulative charts and the session list '
+        'always show the whole history, with the selected period shaded.</p>'
+    )
+
+
+def _legend(has_ev: bool) -> str:
+    return (
+        '<div class="legend">'
+        '<span><i style="border-color:var(--total)"></i>Total (net)</span>'
+        '<span><i style="border-color:var(--showdown);border-top-style:dashed"></i>'
+        'Showdown &mdash; blue line</span>'
+        '<span><i style="border-color:var(--nonshowdown);border-top-style:dotted"></i>'
+        'Non-showdown &mdash; red line</span>'
+        + ('<span><i style="border-color:var(--ev);border-top-style:dashed"></i>'
+           'All-in adjusted EV</span>' if has_ev else "")
+        + '</div>'
+    )
+
+
+def _session_rows(sess) -> str:
+    return "".join(
+        "<tr><td>{}</td><td>{:.0f} min</td><td>{:,}</td><td>{}</td>"
+        "<td>{:+.1f}</td></tr>".format(
+            esc(s["start"][:16]), s["duration_min"], s["hands"],
+            s["n_tables"], s["bb100"])
+        for s in sess
+    )
+
+
+def _problems_block(conn, n_problems: int) -> str:
+    if not n_problems:
+        return ""
+    items = "".join(
+        f"<li><code>{esc(p['site_hand_no'])}</code> &mdash; {esc(p['problem'])}</li>"
+        for p in stats.problems(conn, 40))
+    return (
+        f'<h2>Parse problems</h2><div class="banner">{n_problems} problem(s) '
+        f'recorded. Every one is a hand whose arithmetic did not balance or '
+        f'whose text was not understood &mdash; treat them as parser bugs, not '
+        f'noise.</div><div class="card"><ul>{items}</ul></div>')
+
+
 def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
     m = stats.money_summary(conn, hero)
     if not m.get("hands"):
         return "<h1>No hands imported</h1>"
 
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
-    tourn = stats.excluded_tournaments(conn, hero)
-    tourney_note = (
-        f" Cash games only: {tourn['hands']:,} tournament "
-        f"{'hand' if tourn['hands'] == 1 else 'hands'} across "
-        f"{tourn['events']:,} "
-        f"{'event' if tourn['events'] == 1 else 'events'} are imported but "
-        "excluded from every figure above." if tourn["hands"] else "")
+    tourney_note = _tourney_note(stats.excluded_tournaments(conn, hero))
     # The most recent *cash* hand: the report is a cash report, and a night that
     # happened to end on a sit-and-go would otherwise put "$20.00/$40.00" in the
     # header. The predicate is stats.CASH_ONLY so there is one definition of
@@ -1962,57 +918,7 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
          "raws": {str(k): v for k, v in raws.items()}},
         "period-data")
 
-    period_bar = ""
-    if len(periods) > 1:
-        chips = "".join(
-            f'<button type="button" class="chip" data-period="{esc(p["key"])}" '
-            f'aria-pressed="{"true" if p["key"] == "all" else "false"}">'
-            f'{esc(p["label"])}'
-            + ("" if p["key"] == "all" else
-               f' <span class="chip-count">({p["hands"]:,})</span>')
-            + '</button>'
-            for p in meta
-        )
-        period_bar = (
-            '<div class="chip-row period-bar" role="group" '
-            'aria-label="Filter by period">'
-            '<span class="chip-label">Period</span>' + chips + '</div>'
-            '<p class="period-note">Filters the tables, the frequencies and the '
-            'compliance checks, and adds a comparison against everything before '
-            'the selected window. The cumulative charts and the session list '
-            'always show the whole history, with the selected period shaded.</p>'
-        )
-
-    legend = (
-        '<div class="legend">'
-        '<span><i style="border-color:var(--total)"></i>Total (net)</span>'
-        '<span><i style="border-color:var(--showdown);border-top-style:dashed"></i>'
-        'Showdown &mdash; blue line</span>'
-        '<span><i style="border-color:var(--nonshowdown);border-top-style:dotted"></i>'
-        'Non-showdown &mdash; red line</span>'
-        + ('<span><i style="border-color:var(--ev);border-top-style:dashed"></i>'
-           'All-in adjusted EV</span>' if m["has_ev"] else "")
-        + '</div>'
-    )
-
-    sess_rows = "".join(
-        "<tr><td>{}</td><td>{:.0f} min</td><td>{:,}</td><td>{}</td>"
-        "<td>{:+.1f}</td></tr>".format(
-            esc(s["start"][:16]), s["duration_min"], s["hands"],
-            s["n_tables"], s["bb100"])
-        for s in sess
-    )
-
-    problems_block = ""
-    if n_problems:
-        items = "".join(
-            f"<li><code>{esc(p['site_hand_no'])}</code> &mdash; {esc(p['problem'])}</li>"
-            for p in stats.problems(conn, 40))
-        problems_block = (
-            f'<h2>Parse problems</h2><div class="banner">{n_problems} problem(s) '
-            f'recorded. Every one is a hand whose arithmetic did not balance or '
-            f'whose text was not understood &mdash; treat them as parser bugs, not '
-            f'noise.</div><div class="card"><ul>{items}</ul></div>')
+    period_bar = _period_bar(meta) if len(periods) > 1 else ""
 
     roll_caveat = ("" if roll_window >= 1000 else
                    " The window is narrowed from the usual 1,000 because the "
@@ -2062,7 +968,7 @@ supports it. The red line is not "profit from bluffing": it is every pot taken d
 hand that never reached showdown. A slightly negative red line is normal at
 micro stakes; a sharply negative one usually means you are opening and
 c-betting into people who never fold.</p>
-<div class="card">{legend}{charts.cumulative_winnings(rows, m['has_ev'])}</div>
+<div class="card">{_legend(m['has_ev'])}{charts.cumulative_winnings(rows, m['has_ev'])}</div>
 
 <h2>2. bb/100 by position</h2>
 <p class="note">Error bars are 95% confidence intervals. They will be
@@ -2146,7 +1052,7 @@ history.</p>
 <div class="card">{charts.session_scatter(sess)}
 <details><summary>Table view</summary>
 <table><thead><tr><th>Start</th><th>Duration</th><th>Hands</th><th>Tables</th>
-<th>bb/100</th></tr></thead><tbody>{sess_rows}</tbody></table></details></div>
+<th>bb/100</th></tr></thead><tbody>{_session_rows(sess)}</tbody></table></details></div>
 
 <h2>13. Effective stacks</h2>
 <p class="note">A one-off diagnostic. Once the distribution sits at 100bb you can
@@ -2163,7 +1069,7 @@ frequencies and compliance checks rather than around win rate &mdash; and the
 reason this table recomputes with the filter rather than staying put.</p>
 <div id="r-sample">{a['r-sample']}</div>
 
-{problems_block}
+{_problems_block(conn, n_problems)}
 
 <footer>Generated by pokertracker from PokerStars hand histories.
 Rake is attributed to players in proportion to contribution, which is an
