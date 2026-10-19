@@ -1894,9 +1894,21 @@ def _json_script(payload: dict, element_id: str) -> str:
 
 
 def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
+    return build_pages(conn, hero)[live]
+
+
+def build_pages(conn: sqlite3.Connection, hero: str) -> dict[bool, str]:
+    """The static page and the live one, keyed by `live`, from one render.
+
+    Every figure on the two is the same; only the toolbar, the live scripts and
+    the Solver panel differ. `serve.run_refresh` needs both after new hands
+    arrive -- the file on disk and the page about to reload -- and rendering
+    the periods twice was most of what a refresh cost.
+    """
     m = stats.money_summary(conn, hero)
     if not m.get("hands"):
-        return "<h1>No hands imported</h1>"
+        empty = "<h1>No hands imported</h1>"
+        return {False: empty, True: empty}
 
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     tourn = stats.excluded_tournaments(conn, hero)
@@ -2012,11 +2024,6 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
     # stale. It counts every hand, tournaments included, to match the figure
     # `serve.run_refresh` reports back.
     rendered_hands = conn.execute("SELECT COUNT(*) n FROM hands").fetchone()["n"]
-    toolbar = (f"""
-<div class="toolbar">
-  <span id="refresh-status" class="status" data-hands="{rendered_hands}">Checking every 60s</span>
-</div>""" if live else "")
-    live_js = LIVE_JS + SOLVER_JS if live else ""
     a = regions["all"]
     tabs = (
         '<div class="tabs" role="tablist">'
@@ -2025,7 +2032,13 @@ def build(conn: sqlite3.Connection, hero: str, live: bool = False) -> str:
         '<button type="button" class="tab" role="tab" data-tab="solver" '
         'aria-selected="false">Solver</button></div>')
 
-    return f"""<!doctype html>
+    def page(live: bool) -> str:
+        toolbar = (f"""
+<div class="toolbar">
+  <span id="refresh-status" class="status" data-hands="{rendered_hands}">Checking every 60s</span>
+</div>""" if live else "")
+        live_js = LIVE_JS + SOLVER_JS if live else ""
+        return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Poker tracker &mdash; {esc(hero)}</title>
@@ -2161,6 +2174,8 @@ estimate: PokerStars reports rake per pot, not per player.{tourney_note}</footer
 {payload}
 <script>{JS}{live_js}</script>
 </body></html>"""
+
+    return {live: page(live) for live in (False, True)}
 
 
 def _street_cells(ag, key: str, suffix: str) -> str:
