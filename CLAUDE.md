@@ -28,7 +28,10 @@ python -m unittest tests.test_equity.TestEquity.test_aces_versus_kings_preflop
 ```
 
 Run everything from the project root. `test_equity` is the slow one — it
-enumerates C(48,5) boards for real.
+enumerates C(48,5) boards for real. `test_page_js` runs `static/report.js`
+under Node against a stub DOM, to check the period restore across the live
+reload, and skips if `node` is not on PATH. `test_cli` drives `cli.main()`
+the way a shell does, because closing the connection is `main()`'s job.
 
 Flags: `--root` (history folder), `--db`, `--hero` (overrides auto-detection),
 `--port`, `--no-open`.
