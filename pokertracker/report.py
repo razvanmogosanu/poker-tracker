@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import charts, db, handclass, ranges, solver, stats
-from .cards import RANK_CHARS, grid_cell
+from .cards import RANK_CHARS, all_combos, grid_cell
 from .charts import esc, fmt
 from .positions import POSITION_ORDER
 
@@ -472,11 +472,12 @@ averaging them together flatters the bluffs and punishes the semi-bluffs.</p>
 </div>"""
 
 
-def _compact_grid(grid: dict) -> dict:
-    """[n, vpip, bb100] per combo. See the note in charts.range_heatmap."""
-    return {c: [v["n"], v["vpip"],
-                None if v["bb100"] is None else round(v["bb100"], 1)]
-            for c, v in grid.items()}
+def _compact_grid(grid: dict) -> list:
+    """[n, vpip, bb100] per cell, 0 if never dealt. See charts.range_heatmap."""
+    return [[v["n"], v["vpip"],
+             None if v["bb100"] is None else round(v["bb100"], 1)]
+            if (v := grid.get(c)) else 0
+            for c in all_combos()]
 
 
 def _rate_of(rows, name: str):
@@ -921,8 +922,11 @@ def build_pages(conn: sqlite3.Connection, hero: str) -> dict[bool, str]:
                      "hands": period.selected.hands, "band": band})
 
     raws = db.hand_texts(conn, sorted(set(hand_ids)))
+    # "all" is left out: it is the page's own markup, and the browser reads it
+    # back from the region ids rather than carrying the same fragments twice.
     payload = _json_script(
-        {"periods": meta, "regions": regions,
+        {"periods": meta, "ids": list(regions["all"]),
+         "regions": {k: v for k, v in regions.items() if k != "all"},
          "raws": {str(k): v for k, v in raws.items()}},
         "period-data")
 

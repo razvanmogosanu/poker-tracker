@@ -8,6 +8,8 @@ posted as "small & big blinds", and a dead small blind posted on its own).
 
 from __future__ import annotations
 
+import html
+import itertools
 import re
 import sqlite3
 import sys
@@ -1442,6 +1444,73 @@ class TestDirectLabelsDoNotCollide(unittest.TestCase):
         self.assertEqual(charts.stack_labels([57.0], 0.0, 400.0), [57.0])
 
 
+class TestReportSize(unittest.TestCase):
+    """A long history must not make the page grow with every hand played."""
+
+    @staticmethod
+    def walk(n, seed=7):
+        import random
+
+        rng = random.Random(seed)
+        out, v = [], 0.0
+        for _ in range(n):
+            v += rng.gauss(0, 3)
+            out.append(v)
+        return out
+
+    def test_the_envelope_keeps_every_bucket_extreme_and_the_last_point(self):
+        vals = self.walk(20000)
+        keep = charts.envelope(vals, 500)
+        self.assertEqual(keep, sorted(set(keep)))
+        self.assertEqual(keep[-1], len(vals) - 1)
+        self.assertLessEqual(len(keep), 2 * 500 + 1)
+        kept = set(keep)
+        for b in range(500):
+            seg = vals[b * 40:(b + 1) * 40]
+            self.assertIn(min(seg), {vals[i] for i in kept if b * 40 <= i < (b + 1) * 40})
+            self.assertIn(max(seg), {vals[i] for i in kept if b * 40 <= i < (b + 1) * 40})
+        self.assertEqual(min(vals), min(vals[i] for i in keep))
+        self.assertEqual(max(vals), max(vals[i] for i in keep))
+
+    def test_a_short_line_is_drawn_point_for_point(self):
+        self.assertEqual(charts.envelope([1.0, 2.0, 0.5], 500), [0, 1, 2])
+
+    def winnings_payload(self, n):
+        import json as _json
+        import re as _re
+
+        rows = [{"net_bb": v, "ev_bb": v, "sd": i % 3 == 0}
+                for i, v in enumerate(self.walk(n))]
+        out = charts.cumulative_winnings(rows, has_ev=True)
+        m = _re.search(r'data-payload="([^"]*)"', out)
+        return out, _json.loads(html.unescape(m.group(1)))
+
+    def test_the_winnings_chart_stays_bounded_however_many_hands(self):
+        small, _ = self.winnings_payload(5000)
+        big, d = self.winnings_payload(50000)
+        self.assertLess(len(big), 150_000)
+        self.assertLess(len(big), 1.5 * len(small))
+        self.assertEqual(d["n"], 50000)
+
+    def test_the_tooltip_samples_end_on_the_final_total(self):
+        _, d = self.winnings_payload(12345)
+        totals = [round(t, 1) for t in itertools.accumulate(self.walk(12345))]
+        vals = d["series"][0]["values"]
+        self.assertEqual(vals[-1], totals[-1])
+        for j, v in enumerate(vals):
+            self.assertEqual(v, totals[min(j * d["step"], d["n"] - 1)])
+
+    def test_heatmap_cells_line_up_with_the_grid_by_index(self):
+        from pokertracker.cards import all_combos
+
+        grid = report._compact_grid({"AKs": {"n": 4, "vpip": 3, "bb100": 12.34}})
+        self.assertEqual(len(grid), 169)
+        i = all_combos().index("AKs")
+        self.assertEqual(grid[i], [4, 3, 12.3])
+        self.assertEqual(sum(1 for c in grid if c), 1, "never dealt is 0")
+        self.assertIn(f'data-combo="AKs" data-i="{i}"', charts._grid_cells("sel"))
+
+
 class TestTournamentsExcluded(unittest.TestCase):
     """Tournament hands are imported, then ignored by every cash figure.
 
@@ -1535,6 +1604,31 @@ class TestReportPeriods(unittest.TestCase):
             cls.html, _re.S)
         assert m, "the report must inline its period payload"
         cls.payload = _json.loads(m.group(1).replace("\\u003c", "<"))
+        # "all" is not shipped: the page reads it back out of its own markup by
+        # region id, so the tests do the same.
+        assert "all" not in cls.payload["regions"]
+        cls.payload["regions"]["all"] = {
+            i: cls.region_markup(cls.html, i) for i in cls.payload["ids"]}
+
+    @staticmethod
+    def region_markup(html, region_id):
+        """What `el.innerHTML` would be for the element carrying this id."""
+        import re as _re
+
+        start = html.index(f'id="{region_id}">') + len(f'id="{region_id}">')
+        name = _re.match(r"<(\w+)", html[html.rfind("<", 0, start):]).group(1)
+        depth = 1
+        for m in _re.finditer(rf"<(/?){name}\b", html[start:]):
+            depth += -1 if m.group(1) else 1
+            if depth == 0:
+                return html[start:start + m.start()]
+        raise AssertionError(f"{region_id} is never closed")
+
+    def test_all_is_read_from_the_page_not_shipped_twice(self):
+        a = self.payload["regions"]["all"]
+        self.assertEqual(sorted(a), sorted(self.payload["ids"]))
+        self.assertIn("Win rate", a["r-tiles"])
+        self.assertIn("data-hand=", a["r-drilldown"])
 
     def test_every_period_carries_a_full_set_of_regions(self):
         keys = {p["key"] for p in self.payload["periods"]}
