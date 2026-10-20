@@ -47,7 +47,7 @@ class CliCase(unittest.TestCase):
 
 class TestImport(CliCase):
     def test_the_fixtures_are_imported_and_the_hero_found(self):
-        self.assertIn("hands imported: 12", self.import_out)
+        self.assertIn("hands imported: 13", self.import_out)
         self.assertIn("hero: Utg", self.import_out)
 
     def test_a_second_import_skips_unchanged_files(self):

@@ -152,8 +152,11 @@ RE_HEADER = re.compile(
 RE_CASH_GAME = re.compile(
     r"^(?P<game>.+?)\s+\((?P<sb>[^/]+)/(?P<bb>[^)\s]+)(?:\s+(?P<cur>[A-Z]{3}))?\)\s+-\s+(?P<ts>.*)$"
 )
+# A heads-up match tournament puts the round ahead of the level:
+# "Hold'em No Limit - Match Round I, Level I (25/50)".
 RE_TOURNEY = re.compile(
     r"^Tournament\s+#(?P<tid>\d+),\s+(?P<buyin>.*?)\s+(?P<game>Hold'em No Limit|.+?)\s+-\s+"
+    r"(?:Match\s+Round\s+\S+,\s+)?"
     r"Level\s+(?P<level>\S+)\s+\((?P<sb>[^/]+)/(?P<bb>[^)]+)\)\s+-\s+(?P<ts>.*)$"
 )
 RE_TIMES = re.compile(
@@ -281,6 +284,12 @@ def parse_hand(block: str, hero_hint: str = "") -> Hand:  # noqa: C901 - a parse
         hand.sb, hand.bb = parse_money(mt.group("sb")), parse_money(mt.group("bb"))
         ts = mt.group("ts")
     else:
+        # RE_CASH_GAME is loose enough to swallow a tournament header it does
+        # not recognise, filing the hand as cash with the blind level as its
+        # stakes. That is how "Match Round" hands reached the cash figures and
+        # put $25.00/$50.00 in the report header. Fail loudly instead.
+        if rest.startswith("Tournament"):
+            raise ParseError(f"unrecognised tournament header: {rest!r}")
         mc = RE_CASH_GAME.match(rest)
         if not mc:
             raise ParseError(f"unrecognised header body: {rest!r}")

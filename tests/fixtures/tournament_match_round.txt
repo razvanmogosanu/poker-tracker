@@ -1,0 +1,34 @@
+PokerStars Hand #900000013: Tournament #4031000000, $0.96+$0.04 USD Hold'em No Limit - Match Round I, Level I (25/50) - 2026/08/31 10:20:00 EET [2026/08/31 3:20:00 ET]
+Table '4031000000 2' 4-max Seat #1 is the button
+Seat 1: Btn (500 in chips)
+Seat 2: Sb (500 in chips)
+Seat 3: Bb (500 in chips)
+Seat 4: Utg (500 in chips)
+Btn: posts the ante 10
+Sb: posts the ante 10
+Bb: posts the ante 10
+Utg: posts the ante 10
+Sb: posts small blind 25
+Bb: posts big blind 50
+*** HOLE CARDS ***
+Dealt to Utg [Qc 8h]
+Utg: folds
+Btn: folds
+Sb: raises 50 to 100
+Bb: raises 390 to 490 and is all-in
+Sb: calls 390 and is all-in
+*** FLOP *** [9c Jh Td]
+*** TURN *** [9c Jh Td] [Ad]
+*** RIVER *** [9c Jh Td Ad] [4h]
+*** SHOW DOWN ***
+Sb: shows [Kd Ks] (a pair of Kings)
+Bb: shows [9d Qh] (a pair of Nines)
+Sb collected 1020 from pot
+Bb finished the tournament in 16th place
+*** SUMMARY ***
+Total pot 1020 | Rake 0
+Board [9c Jh Td Ad 4h]
+Seat 1: Btn (button) folded before Flop (didn't bet)
+Seat 2: Sb (small blind) showed [Kd Ks] and won (1020) with a pair of Kings
+Seat 3: Bb (big blind) showed [9d Qh] and lost with a pair of Nines
+Seat 4: Utg folded before Flop (didn't bet)

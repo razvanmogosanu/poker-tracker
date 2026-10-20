@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pokertracker import charts, db, derive, handclass, report, stats  # noqa: E402
 from pokertracker.cards import parse_cards  # noqa: E402
-from pokertracker.parser import parse_file, parse_money, split_hands  # noqa: E402
+from pokertracker.parser import (  # noqa: E402
+    ParseError, parse_file, parse_hand, parse_money, split_hands)
 from pokertracker.positions import assign_positions, position_ladder  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -256,6 +257,24 @@ class TestActionSemantics(unittest.TestCase):
         self.assertEqual(hand.problems, [])
         winner = next(r for r in hand.results if r.player == "Btn")
         self.assertEqual(winner.collected, 94000)  # chips scaled by 100
+
+    def test_match_round_header_is_a_tournament(self):
+        # "Match Round I, Level I (25/50)" once fell through to the cash
+        # pattern, which filed the hand as a $25/$50 cash game.
+        hand = load("tournament_match_round")
+        self.assertEqual(hand.problems, [])
+        self.assertTrue(hand.is_tournament)
+        self.assertEqual(hand.tournament_id, "4031000000")
+        self.assertEqual(hand.level, "I")
+        self.assertEqual((hand.sb, hand.bb), (2500, 5000))
+
+    def test_unknown_tournament_header_is_an_error_not_cash(self):
+        # The next new tournament format has to reach the problems table,
+        # not the cash figures.
+        block = (FIXTURES / "tournament_match_round.txt").read_text(encoding="utf-8")
+        block = block.replace("Match Round I, Level I", "Final Stage, Level I")
+        with self.assertRaises(ParseError):
+            parse_hand(block)
 
     def test_uncalled_bet_reduces_contribution(self):
         hand = load("preflop_sequence")
@@ -1578,6 +1597,12 @@ class TestTournamentsExcluded(unittest.TestCase):
         conn = self.load_into(self.CASH + ("tournament_ticket",))
         html = report.build(conn, self.HERO)
         self.assertNotIn("$20.00/$40.00", html)
+
+    def test_match_round_tournament_is_excluded_too(self):
+        before = self.snapshot(self.load_into(self.CASH))
+        conn = self.load_into(self.CASH + ("tournament_match_round",))
+        self.assertEqual(before, self.snapshot(conn))
+        self.assertNotIn("$25.00/$50.00", report.build(conn, self.HERO))
 
 
 class TestReportPeriods(unittest.TestCase):
