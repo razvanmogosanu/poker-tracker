@@ -193,8 +193,12 @@ def svg(body: str, w=W, h=H, cls="chart") -> str:
 # 1. cumulative winnings
 
 
-def cumulative_winnings(rows, has_ev: bool) -> str:
-    """The chart trackers exist for: total, showdown, non-showdown and EV."""
+def cumulative_winnings(rows, has_ev: bool, xlabel: str = "Hands played") -> str:
+    """The chart trackers exist for: total, showdown, non-showdown and EV.
+
+    Every line starts from zero at the first row, so handed a period's rows it
+    draws that period on its own rather than its place in the career total.
+    """
     if not rows:
         return '<p class="empty">No hands yet.</p>'
 
@@ -227,13 +231,7 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
     f = Frame(0, max(xhi, 1), ylo, yhi)
 
     out = [f.grid(yticks, xticks, xfmt=lambda v: fmt(v, 0),
-                  ylabel="Cumulative bb", xlabel="Hands played")]
-    # The period filter shades this band instead of redrawing the chart over a
-    # shorter axis. A single session plotted on its own is unreadable noise;
-    # the reason to look at this chart at all is where the selected hands sit
-    # relative to everything that came before them.
-    out.append(f'<rect class="period-band" x="{f.left}" y="{f.top}" width="0" '
-               f'height="{f.bottom - f.top:.1f}"/>')
+                  ylabel="Cumulative bb", xlabel=xlabel)]
     # Direct labels at the end of each line, so identity never rests on colour,
     # spread apart where two lines finish on top of each other.
     label_ys = stack_labels([f.sy(vals[-1]) + 4 for _, vals, _, _ in series],
@@ -258,8 +256,7 @@ def cumulative_winnings(rows, has_ev: bool) -> str:
     payload = json.dumps({
         "left": f.left, "right": f.right, "top": f.top, "bottom": f.bottom,
         # The x axis is padded out to a round tick past the last hand, so the
-        # period band and the crosshair need the domain to place themselves,
-        # not just the pixels.
+        # crosshair needs the domain to place itself, not just the pixels.
         "n": n, "x0": f.x0, "x1": f.x1, "step": step,
         "series": [{"name": nm, "key": k,
                     "values": [round(vals[i], 1) for i in samples]}

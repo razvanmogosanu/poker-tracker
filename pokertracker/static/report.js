@@ -3,9 +3,10 @@
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 
   // The selected period, and everything that needs telling when it changes.
-  // Sections that re-render server-side are swapped wholesale; the charts and
-  // the heatmap instead redraw from data they already hold, because they show
-  // the selected period in the context of the whole history rather than alone.
+  // Sections that re-render server-side are swapped wholesale, the winnings
+  // chart among them; the rolling chart and the heatmap instead redraw from
+  // data they already hold, the one shading the selected period in the context
+  // of the whole history and the other painting it beside the prior one.
   let PERIOD = 'all';
   // Keys shared with LIVE_JS, which runs in its own scope in the same script.
   const PKEY = 'pt-period', SKEY = 'pt-jumpy-starts', RELOADED = 'pt-reloaded';
@@ -77,53 +78,47 @@
   }
 
   // ---- cumulative winnings: crosshair + shared tooltip
-  $$('[data-chart="winnings"]').forEach(function (wrap) {
-    const d = JSON.parse(wrap.dataset.payload);
-    const svg = $('svg', wrap), tip = $('.tooltip', wrap);
-    const hair = $('.crosshair', wrap), target = $('.hover-target', wrap);
-    const m = d.series[0].values.length;
-    if (!m) return;
-    function toUser(ev) {
-      const pt = svg.createSVGPoint();
-      pt.x = ev.clientX; pt.y = ev.clientY;
-      return pt.matrixTransform(svg.getScreenCTM().inverse());
-    }
-    // Hand h is drawn at h on an axis padded past the last hand, so the
-    // mouse maps through the domain, not across the full plot width.
-    const span = Math.max(1, d.x1 - d.x0), width = d.right - d.left;
-    target.addEventListener('mousemove', function (ev) {
-      const u = toUser(ev);
-      const hand = d.x0 + ((u.x - d.left) / width) * span;
-      // values[j] is hand j * step + 1, the last one clamped to hand n.
-      const j = Math.max(0, Math.min(m - 1, Math.round((hand - 1) / d.step)));
-      const i = Math.min(j * d.step, d.n - 1);
-      const x = d.left + ((i + 1 - d.x0) / span) * width;
-      hair.setAttribute('x1', x); hair.setAttribute('x2', x);
-      hair.style.display = '';
-      tip.hidden = false;
-      tip.innerHTML = '<b>Hand ' + (i + 1) + '</b><br>' + d.series.map(function (s) {
-        return '<span class="sw" style="background:var(--' + s.key + ')"></span>' +
-               s.name + ' <b>' + s.values[j].toFixed(1) + ' bb</b>';
-      }).join('<br>');
-      place(tip, wrap, ev);
+  // Bound through a function for the same reason as initDrilldown: the chart
+  // is redrawn per period server-side and swapped in, handlers and all.
+  function initWinnings(root) {
+    $$('[data-chart="winnings"]', root).forEach(function (wrap) {
+      const d = JSON.parse(wrap.dataset.payload);
+      const svg = $('svg', wrap), tip = $('.tooltip', wrap);
+      const hair = $('.crosshair', wrap), target = $('.hover-target', wrap);
+      const m = d.series[0].values.length;
+      if (!m) return;
+      function toUser(ev) {
+        const pt = svg.createSVGPoint();
+        pt.x = ev.clientX; pt.y = ev.clientY;
+        return pt.matrixTransform(svg.getScreenCTM().inverse());
+      }
+      // Hand h is drawn at h on an axis padded past the last hand, so the
+      // mouse maps through the domain, not across the full plot width.
+      const span = Math.max(1, d.x1 - d.x0), width = d.right - d.left;
+      target.addEventListener('mousemove', function (ev) {
+        const u = toUser(ev);
+        const hand = d.x0 + ((u.x - d.left) / width) * span;
+        // values[j] is hand j * step + 1, the last one clamped to hand n.
+        const j = Math.max(0, Math.min(m - 1, Math.round((hand - 1) / d.step)));
+        const i = Math.min(j * d.step, d.n - 1);
+        const x = d.left + ((i + 1 - d.x0) / span) * width;
+        hair.setAttribute('x1', x); hair.setAttribute('x2', x);
+        hair.style.display = '';
+        tip.hidden = false;
+        tip.innerHTML = '<b>Hand ' + (i + 1) + '</b><br>' + d.series.map(function (s) {
+          return '<span class="sw" style="background:var(--' + s.key + ')"></span>' +
+                 s.name + ' <b>' + s.values[j].toFixed(1) + ' bb</b>';
+        }).join('<br>');
+        place(tip, wrap, ev);
+      });
+      target.addEventListener('mouseleave', function () {
+        hair.style.display = 'none'; tip.hidden = true;
+      });
     });
-    target.addEventListener('mouseleave', function () {
-      hair.style.display = 'none'; tip.hidden = true;
-    });
+  }
+  initWinnings(document);
 
-    const band = $('.period-band', wrap);
-    listeners.push(function () {
-      const b = BANDS[PERIOD];
-      if (!band) return;
-      if (!b) { band.setAttribute('width', 0); return; }
-      const at = i => d.left + ((i - d.x0) / Math.max(1, d.x1 - d.x0)) * (d.right - d.left);
-      const x0 = at(b[0]), x1 = at(b[1]);
-      band.setAttribute('x', x0.toFixed(1));
-      band.setAttribute('width', Math.max(1.5, x1 - x0).toFixed(1));
-    });
-  });
-
-  // ---- rolling discipline: the same band, on a hand-number axis
+  // ---- rolling discipline: the selected period shaded on a hand-number axis
   $$('[data-chart="rolling"]').forEach(function (wrap) {
     const d = JSON.parse(wrap.dataset.payload);
     const band = $('.period-band', wrap);
@@ -349,6 +344,7 @@
         if (!el) return;
         el.innerHTML = regions[id];
         initDrilldown(el);
+        initWinnings(el);
       });
       $$('.period-bar .chip').forEach(b =>
         b.setAttribute('aria-pressed', String(b.dataset.period === key)));

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import itertools
+import json
 import re
 import sqlite3
 import sys
@@ -1199,6 +1200,26 @@ class TestPeriodFilters(unittest.TestCase):
             lo, hi = stats.hand_index_range(self.conn, self.HERO, p.selected)
             self.assertEqual(hi, total, p.key)
             self.assertEqual(hi - lo + 1, p.selected.hands, p.key)
+
+    def test_the_winnings_chart_draws_only_the_selected_hands(self):
+        # Each period's chart starts from zero at its own first hand, so its
+        # Total line ends on the period's net rather than the career figure.
+        page = report.build(self.conn, self.HERO)
+        data = json.loads(re.search(
+            r'<script type="application/json" id="period-data">(.*?)</script>',
+            page, re.S).group(1))
+        charts_by_key = {k: v["r-winnings"] for k, v in data["regions"].items()}
+        charts_by_key["all"] = page
+        self.assertGreater(len(charts_by_key), 1)
+        windows = {p.key: p.selected for p in stats.periods(self.conn, self.HERO)}
+        for key, markup in charts_by_key.items():
+            payload = json.loads(html.unescape(re.search(
+                r'data-chart="winnings" data-payload="([^"]*)"', markup).group(1)))
+            m = stats.money_summary(self.conn, self.HERO, windows[key])
+            self.assertEqual(payload["n"], m["hands"], key)
+            total = next(s for s in payload["series"] if s["key"] == "total")
+            self.assertAlmostEqual(total["values"][-1], m["net_bb"], places=0,
+                                   msg=key)
 
     def test_a_thin_denominator_is_not_reported_as_a_failure(self):
         """0 opens out of 2 opportunities is silence, not a broken plan."""

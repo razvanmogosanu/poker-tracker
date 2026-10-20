@@ -476,10 +476,17 @@ escapes so it cannot terminate its own element. Anything bound with an event
 listener inside a swapped region has to be re-bound afterwards, which is why the
 drill-down's handlers live in `initDrilldown(root)` rather than inline.
 
-The two cumulative charts and the session list are the exception: they always
-show the whole history, with the selected period drawn as a shaded band. A
-single session plotted on its own axis is unreadable, and the only useful thing
-it can say is where it sits relative to everything before it. The band is
+The cumulative winnings chart is one of those fragments: under a period it is
+redrawn over the selected hands alone, every line starting from zero at the
+window's first hand, so it shows what happened between the period's start and
+its end rather than where that left the career total. Its crosshair is bound in
+`initWinnings(root)` for the same reason as the drill-down. Each period carries
+its own copy of the chart, which is most of what the page pays for this.
+
+The rolling-discipline chart and the session list are the exception: they
+always show the whole history, with the selected period drawn as a shaded band
+on the chart. A rolling rate needs its window of hands before the first point it
+can plot, so redrawn over a short period it would have nothing to show. The band is
 positioned from the chart's *data domain*, not its pixel width — `nice_ticks`
 pads the x axis out to a round number past the last hand, so a band placed by
 pixel fraction lands in the wrong place. The band is hidden by zero width rather

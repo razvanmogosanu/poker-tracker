@@ -676,10 +676,19 @@ def _fragments(conn, hero: str, period, positions, generated: str, stake_txt: st
         grids["pri"] = {k: _compact_grid(stats.range_grid(
             conn, hero, None if k == "All" else k, prior_w)) for k in positions}
 
+    # The winnings chart is redrawn over the selected hands alone, starting
+    # from zero at the window's first hand, so the lines say what happened
+    # between t0 and t1 rather than where t1 left the career total. The
+    # rolling chart and the session list still show the whole history.
+    winnings = charts.cumulative_winnings(
+        stats.bb_series(conn, hero, w), m["has_ev"],
+        xlabel="Hands in period" if filtered else "Hands played")
+
     regions = {
         "r-sub": sub,
         "r-tiles": tiles,
         "r-banner": banner,
+        "r-winnings": f'<div class="card">{_legend(m["has_ev"])}{winnings}</div>',
         "r-position": _position_card(pos_rows),
         "r-preflop": f'<div class="card">{_rate_table(pre, pre_prior)}</div>',
         "r-postflop": (
@@ -825,7 +834,8 @@ def _period_bar(meta) -> str:
         '<span class="chip-label">Period</span>' + chips + '</div>'
         '<p class="period-note">Filters the tables, the frequencies and the '
         'compliance checks, and adds a comparison against everything before '
-        'the selected window. The cumulative charts and the session list '
+        'the selected window. The winnings chart redraws over the selected '
+        'hands, starting from zero; the rolling chart and the session list '
         'always show the whole history, with the selected period shaded.</p>'
     )
 
@@ -895,11 +905,9 @@ def build_pages(conn: sqlite3.Connection, hero: str) -> dict[bool, str]:
         " ORDER BY played_at DESC LIMIT 1").fetchone()
     stake_txt = f"${stake['sb'] / 100:.2f}/${stake['bb'] / 100:.2f}" if stake else ""
 
-    # These three are drawn once over the whole history no matter what is
-    # selected. A period is shaded on the two cumulative charts rather than
-    # plotted alone, because the only useful thing a single session's line can
-    # tell you is where it sits relative to everything before it.
-    rows = stats.bb_series(conn, hero)
+    # These two are drawn once over the whole history no matter what is
+    # selected, with the period shaded on the rolling chart: a rolling rate
+    # needs its window of hands before the first one it can plot.
     roll_window = 1000 if m["hands"] >= 1000 else max(25, m["hands"] // 3)
     roll = stats.rolling(conn, hero, roll_window)
     sess = stats.sessions(conn, hero)
@@ -981,7 +989,7 @@ supports it. The red line is not "profit from bluffing": it is every pot taken d
 hand that never reached showdown. A slightly negative red line is normal at
 micro stakes; a sharply negative one usually means you are opening and
 c-betting into people who never fold.</p>
-<div class="card">{_legend(m['has_ev'])}{charts.cumulative_winnings(rows, m['has_ev'])}</div>
+<div id="r-winnings">{a['r-winnings']}</div>
 
 <h2>2. bb/100 by position</h2>
 <p class="note">Error bars are 95% confidence intervals. They will be
