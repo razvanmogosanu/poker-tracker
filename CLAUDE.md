@@ -179,14 +179,26 @@ five-card board yields zero outs by construction: a busted draw that pays off a
 river bet is naked at the moment it pays, because by then there is nothing left
 to draw to, and that is the hand the split exists to name.
 
-**The bucket is measured at the street the player LEFT the hand on**, which is
-what `saw_flop`/`saw_turn`/`saw_river` already say. The board runs out in a
+**The bucket is measured at the last street the player DECIDED on** -- the
+last postflop street they took an action on, which is where they left the hand
+or where they went all-in, whichever came first. The board runs out in a
 multiway pot whether or not you are still in it, and scoring a flop fold
 against five cards would judge the decision on a card that had not been dealt
 when it was made. Top pair on the flop is genuinely second pair once an ace
 turns, and the bucket says the second thing, because that is the hand that was
 played. There is a fixture for this: it gives a folded holding a turn and a
 river that would make it trips and asserts the bucket does not move.
+
+An all-in is the same rule from the other side, and it is why the rule reads
+actions rather than `saw_turn`/`saw_river`. A flop shove on an open-ender sees
+the river, but neither later card was a decision; judged on five cards it lands
+in naked "no pair" -- the bucket that exists to find naked punts -- or, when it
+gets there, in straight+. On the real history that moved about 575 bb out of
+the naked bucket. A player with chips behind acts on every street they reach,
+even if only to check, so "last street acted on" needs no all-in special case.
+The flop is the floor: a preflop all-in still gets its flop bucket. Fixture
+900000008 covers it: a flush-draw shove the turn ace makes top pair stays a
+draw, and the top pair that called it stays top pair.
 
 **`postflop_invested` is the one derived figure that reads `actions` rather
 than `acts`, and `invested_flop`/`_turn`/`_river` split the same money by

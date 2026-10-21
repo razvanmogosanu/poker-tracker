@@ -720,6 +720,24 @@ class TestHandClassInTheDatabase(unittest.TestCase):
             handclass.classify(parse_cards("Ac Kc"), parse_cards("2c 7d 9s Ks Kd")),
             handclass.TRIPS)
 
+    def test_an_all_in_is_judged_on_the_street_it_went_in(self):
+        """A flop shove on a draw is a semi-bluff, whatever the river does.
+
+        Winner gets it in with Ac 6c on Ks 8c 7c -- nine clean outs -- and the
+        turn ace makes it top pair. Neither the turn nor the river was a
+        decision, so the bucket is the one the money went in with. Insurer
+        calls the shove with top pair and is still top pair, not the second
+        pair the ace demotes them to.
+        """
+        self.assertEqual(self.klass("Winner", "900000008"), handclass.NO_PAIR_DRAW)
+        self.assertEqual(self.klass("Insurer", "900000008"), handclass.TOP_PAIR)
+        # The rule has teeth only because the full board says something else.
+        board = parse_cards("Ks 8c 7c Ad 9s")
+        self.assertEqual(handclass.classify(parse_cards("Ac 6c"), board),
+                         handclass.TOP_PAIR)
+        self.assertEqual(handclass.classify(parse_cards("Qs Kc"), board),
+                         handclass.WEAK_PAIR)
+
     def test_the_summary_covers_every_bucket_in_strength_order(self):
         rows = stats.hand_classes(self.conn, "Utg")
         self.assertEqual([r["class"] for r in rows], list(handclass.CLASSES))

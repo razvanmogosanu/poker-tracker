@@ -31,8 +31,8 @@ line between them is `DRAW_OUTS` (8) -- a flush draw or an open-ender, not a
 gutshot -- which is exactly the rule a review gives on day one and is otherwise
 impossible to check afterwards.
 
-The board passed in is the board *as of the moment the player left the hand* --
-see `derive._classify_rows`. Scoring a flop fold against the river would judge
+The board passed in is the board *as of the player's last decision* -- where
+they left the hand or went all-in -- see `derive._classify_rows`. Scoring a flop fold against the river would judge
 the decision on cards that had not been dealt when it was made. Draws follow
 from that and are not an exception to it: a hand that was still drawing when
 the money went in is counted as drawing, and a busted draw that paid off a

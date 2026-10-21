@@ -219,8 +219,9 @@ These are the choices you will otherwise re-derive wrong in six months.
   that hand is filed under "no pair", which is what it is worth and what it will
   cost you. Same rule at every strength: two pair means your cards made two
   pairs, and a straight on the board that you did not improve on is not yours.
-- **Your made hand is measured at the street you left the hand on**, not at the
-  river. The board runs out in a multiway pot whether or not you are still in
+- **Your made hand is measured at the last street you made a decision on** --
+  where you folded, or where you got all-in -- not at the river. A flop shove
+  on a draw is a semi-bluff, whatever the river brings. The board runs out in a multiway pot whether or not you are still in
   it, and judging a flop fold against a card that had not been dealt yet says
   nothing about the decision. Top pair on the flop is second pair once an ace
   turns, and the bucket says second pair.

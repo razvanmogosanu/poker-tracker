@@ -814,7 +814,7 @@ def hand_classes(conn, hero, min_pot_bb: float = 0.0,
     and only one of them is fixed by folding more.
 
     Buckets are derived at ingest (see `derive._classify_rows`) from the board
-    as of the street the hero left the hand on, so this is a plain grouping.
+    as of the hero's last decision (fold or all-in), so this is a plain grouping.
     Every bucket is returned even when empty, in strength order, so the shape of
     the table does not change with the filter.
     """

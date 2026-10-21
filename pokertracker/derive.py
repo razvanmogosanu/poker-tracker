@@ -21,8 +21,9 @@ wrong in six months):
   Blind posts never raise the level; the first voluntary raise is the open,
   even if there were limpers before it.
 * An opportunity is counted at most once per hand per player.
-* `hand_class` is the made-hand bucket as of the street the player LEFT the
-  hand on, not as of the river. See `_classify_rows`.
+* `hand_class` is the made-hand bucket as of the last street the player
+  DECIDED on -- where they left the hand, or where they were all-in, whichever
+  came first -- not as of the river. See `_classify_rows`.
 * `postflop_invested` is cents added on the flop, turn and river only. Every
   blind and ante is a preflop action, so it needs no exclusion of its own.
   `invested_flop` / `_turn` / `_river` are the same money by street and sum
@@ -49,8 +50,9 @@ CREATE TABLE hand_player (
     hole_combo TEXT,
     starting_stack INTEGER,
     eff_stack_bb REAL,
-    -- made-hand bucket at the moment this player left the hand; NULL when
-    -- there is nothing to classify (folded preflop, or cards never shown)
+    -- made-hand bucket at this player's last decision (left the hand, or
+    -- all-in); NULL when there is nothing to classify (folded preflop, or
+    -- cards never shown)
     hand_class TEXT,
 
     vpip INTEGER DEFAULT 0,
@@ -218,11 +220,19 @@ def rebuild(conn: sqlite3.Connection, progress=None) -> int:
 def _classify_rows(rows, hands, seats_by_hand) -> int:
     """Attach a made-hand bucket to every row whose cards are known.
 
-    The board used is the board as of the street the player LEFT the hand on,
-    which is what `saw_flop`/`saw_turn`/`saw_river` already say. A player who
-    folds the flop in a multiway pot never sees the turn and the river even
-    though they are dealt, and scoring their fold against five cards would
-    judge the decision on information that did not exist when it was made.
+    The board used is the board as of the last street the player took an
+    action on. A player who folds the flop in a multiway pot never sees the
+    turn and the river even though they are dealt, and scoring their fold
+    against five cards would judge the decision on information that did not
+    exist when it was made.
+
+    An all-in is the same thing from the other side: a flop shove with an
+    open-ender sees the turn and the river, but neither was a decision, so
+    judging it on five cards files a semi-bluff as a naked punt -- into the
+    very bucket that exists to find naked punts. The last street acted on
+    covers both cases, since a player with chips behind acts on every street
+    they reach, even if only to check. The flop is the floor: a preflop
+    all-in has nothing to classify before it, and the section is postflop.
 
     Cards are known for the hero in every hand and for opponents only at a
     showdown, so most opponent rows stay NULL. That is fine: the bucket is a
@@ -245,10 +255,11 @@ def _classify_rows(rows, hands, seats_by_hand) -> int:
         flop, turn, river = boards.get(r["hand_id"], ("", "", ""))
         if not hole_txt or not flop:
             continue
+        decided = r.get("_decided_on", 0)
         board_txt = " ".join(
             x for x in (flop,
-                        turn if r["saw_turn"] else "",
-                        river if r["saw_river"] else "") if x
+                        turn if decided >= 1 else "",
+                        river if decided >= 2 else "") if x
         )
         try:
             hole, board = parse_cards(hole_txt), parse_cards(board_txt)
@@ -281,6 +292,12 @@ def _derive_hand(hand, seats, actions, results) -> list[dict]:  # noqa: C901
             folded_at.setdefault(a["player"], a["street"])
         if a["is_allin"] and a["player"] in flags:
             flags[a["player"]]["was_allin"] = 1
+        # The last postflop street this player had a decision on, as an index
+        # into STREETS_AFTER_PREFLOP. Private to `_classify_rows`; not a column.
+        if a["street"] in STREETS_AFTER_PREFLOP and a["player"] in flags:
+            flags[a["player"]]["_decided_on"] = max(
+                flags[a["player"]].get("_decided_on", 0),
+                STREETS_AFTER_PREFLOP.index(a["street"]))
 
     # ---------------- preflop -------------------------------------------
     bet_level = 0
