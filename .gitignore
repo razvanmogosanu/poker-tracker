@@ -13,3 +13,6 @@ __pycache__/
 # Worktrees created by Claude Code sessions: scratch checkouts of this same
 # repository, not content of it.
 .claude/worktrees/
+
+# What the windowless server started by the desktop launcher printed.
+tracker.log

@@ -13,12 +13,16 @@ Pure standard library plus numpy. No install step, no plotting library, no CDN.
 browser and re-parses whatever PokerStars has written every 60 seconds on its
 own; the toolbar says when it last looked. No terminal involved.
 
-A console window stays open behind it — that is the server. Leave it open while
-you use the dashboard; close it to stop. Launching a second time just reopens
-the browser rather than complaining that the port is busy.
+A small splash deals the four suits while the server starts, opens the
+dashboard and fades out; the server then runs in the background with no window.
+To stop it, use **Stop tracker** in the dashboard's toolbar (click twice).
+Launching a second time just reopens the browser rather than complaining that
+the port is busy. If the server cannot start, the splash stays up with the end
+of `tracker.log`, which holds everything the background server printed.
 
-The shortcut points at `Poker tracker.cmd` in this folder, which is just a
-wrapper around `serve` below.
+The shortcut runs `pythonw -m pokertracker.launcher` from this folder.
+`Poker tracker.cmd` is the old behaviour — `serve` in a console window you
+close to stop — and still works.
 
 ### From a terminal
 

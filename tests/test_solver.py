@@ -335,7 +335,8 @@ class TestTheEndpoints(unittest.TestCase):
         serve.run_refresh(path, str(root))
         self.httpd = ThreadingHTTPServer(
             ("127.0.0.1", 0), serve.make_handler(path, str(root), "ButtonSb"))
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.loop = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.loop.start()
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -379,6 +380,25 @@ class TestTheEndpoints(unittest.TestCase):
         self.assertEqual(self._call("/api/hand?id=1&street=river")[0], 400)
         self.assertEqual(self._call("/api/hand?id=999")[0], 400)
         self.assertEqual(self._call("/api/hand")[0], 400)
+
+    def _stop(self, origin):
+        req = urllib.request.Request(self.url + "/api/stop", data=b"",
+                                     headers={"Origin": origin})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                return res.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_another_site_cannot_stop_the_server(self):
+        self.assertEqual(self._stop("https://example.com"), 403)
+        self.assertEqual(self._call("/api/range", {"range": "AA"})[0], 200)
+
+    def test_the_page_stops_the_server(self):
+        """The launcher leaves no window, so the page's button is the off switch."""
+        self.assertEqual(self._stop(self.url), 200)
+        self.loop.join(timeout=5)
+        self.assertFalse(self.loop.is_alive(), "serve_forever still running")
 
 
 if __name__ == "__main__":

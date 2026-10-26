@@ -579,6 +579,14 @@ only worth doing for the few dozen hands the biggest-pots drill-down shows;
 never call it over a whole result set. A source file that has since moved
 yields no text rather than an error, and the report says so in the panel.
 
+**The desktop shortcut runs `pythonw -m pokertracker.launcher`**, a tkinter
+splash that starts `cli serve --no-open` as a detached, windowless process,
+waits for the port, opens the browser and fades out. With no console left to
+close, the live toolbar's Stop button (`POST /api/stop`) is the off switch; it
+refuses a request whose `Origin` is another site. The server's output goes to
+`tracker.log`, and the splash stays up showing its tail if the server dies
+before listening. `Poker tracker.cmd` is the console version and still works.
+
 ## The Solver tab
 
 `report.build` renders two tabs, Stats and Solver. The Solver is `ranges.py`

@@ -199,6 +199,17 @@ def make_handler(db_path: str, root: str, hero: str, output: str = ""):
                 else:
                     self._solver(lambda: _range(json.loads(body or b"{}")))
                 return
+            # The desktop launcher runs the server with no window, so the page
+            # is the only place left to stop it. Another site's page could post
+            # here too; the browser names it in Origin, and that is refused.
+            if path == "/api/stop":
+                origin = self.headers.get("Origin")
+                if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                    self._send(b"forbidden", "text/plain; charset=utf-8", 403)
+                    return
+                self._json({"ok": True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
             if path != "/api/refresh":
                 self._send(b"not found", "text/plain; charset=utf-8", 404)
                 return
@@ -248,4 +259,5 @@ def serve(db_path: str, root: str, hero: str = "", port: int = 8765,
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\nstopped")
+            pass
+        print("\nstopped")

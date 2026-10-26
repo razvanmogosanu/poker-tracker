@@ -90,7 +90,35 @@
     }
   }
 
+  // The desktop launcher leaves no window behind, so this is the off switch.
+  // Two clicks rather than a confirm(): a modal dialog would block the page.
+  const stop = document.getElementById('stop-tracker');
+  let timers = [];
+  if (stop) {
+    let armed = null;
+    stop.addEventListener('click', async function () {
+      if (!armed) {
+        stop.textContent = 'Click again to stop';
+        stop.classList.add('armed');
+        armed = setTimeout(function () {
+          armed = null;
+          stop.textContent = 'Stop tracker';
+          stop.classList.remove('armed');
+        }, 4000);
+        return;
+      }
+      clearTimeout(armed);
+      try {
+        await fetch('/api/stop', { method: 'POST' });
+        timers.forEach(clearInterval);
+        stop.remove();
+        idle('Tracker stopped. Start it again from the desktop shortcut.');
+      } catch (e) {
+        idle('Could not stop the tracker: ' + e.message);
+      }
+    });
+  }
+
   showStamp();
-  setInterval(showStamp, 5000);
-  setInterval(refresh, EVERY);
+  timers = [setInterval(showStamp, 5000), setInterval(refresh, EVERY)];
 })();

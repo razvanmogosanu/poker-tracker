@@ -965,6 +965,7 @@ def build_pages(conn: sqlite3.Connection, hero: str) -> dict[bool, str]:
         toolbar = (f"""
 <div class="toolbar">
   <span id="refresh-status" class="status" data-hands="{rendered_hands}">Checking every 60s</span>
+  <button type="button" id="stop-tracker" class="chip stop">Stop tracker</button>
 </div>""" if live else "")
         live_js = LIVE_JS + SOLVER_JS if live else ""
         return f"""<!doctype html>
